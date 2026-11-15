@@ -1,0 +1,2952 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rừng — a Vietnamese rainforest</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #050806; overflow: hidden; font: 14px/1.5 system-ui, sans-serif; color: #dfe8d8; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #o { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: rgba(4,8,5,.55); transition: opacity .6s; cursor: pointer; text-align: center; }
+  #o h1 { margin: 0; font-weight: 300; letter-spacing: .35em; font-size: 34px; }
+  #s { opacity: .8; min-height: 1.5em; }
+  #k { opacity: .65; font-size: 13px; }
+  body.r #o { opacity: 0; pointer-events: none; }
+  body.e #o { cursor: default; }
+  #i { position: fixed; left: 10px; top: 8px; font: 12px/1.4 ui-monospace, monospace; white-space: pre; color: #cfe; text-shadow: 0 1px 2px #000; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="o"><h1>RỪNG</h1><div id="s">Loading…</div><div id="k">Click to enter · WASD move · mouse look · Q/E down/up · Shift fast · 1–6 viewpoints · F fly-through · B benchmark · H stats · Esc release</div></div>
+<div id="i"></div>
+<script>
+(async()=>{// ============================================================================
+// math, random numbers, noise and the static-geometry builder
+// ============================================================================
+const { sin, cos, tan, sqrt, abs, floor, ceil, min, max, PI, atan2, hypot, round, exp, pow, log, sign, acos, asin } = Math;
+const TAU = PI * 2;
+const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
+const mix = (a, b, t) => a + (b - a) * t;
+const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+
+// deterministic RNG (mulberry32)
+function RNG(seed) {
+  let s = seed >>> 0;
+  const f = () => { s = (s + 0x6d2b79f5) >>> 0; let t = s; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  f.r = (a, b) => a + (b - a) * f();
+  f.i = (n) => floor(f() * n);
+  f.n = () => { let u = 0; for (let k = 0; k < 4; k++) u += f(); return (u - 2) * 0.866; }; // ~N(0,0.5)
+  f.pick = (a) => a[floor(f() * a.length)];
+  return f;
+}
+const ihash = (x) => { x = Math.imul(x ^ (x >>> 16), 0x7feb352d); x = Math.imul(x ^ (x >>> 15), 0x846ca68b); return (x ^ (x >>> 16)) >>> 0; };
+const h2 = (x, z) => ihash((x | 0) * 73856093 ^ ((z | 0) * 19349663)) / 4294967296;
+const h3 = (x, y, z) => ihash((x | 0) * 73856093 ^ ((y | 0) * 19349663) ^ ((z | 0) * 83492791)) / 4294967296;
+// value noise in [-1,1]
+function vn2(x, z) {
+  const ix = floor(x), iz = floor(z), fx = x - ix, fz = z - iz, ux = fx * fx * (3 - 2 * fx), uz = fz * fz * (3 - 2 * fz);
+  const a = h2(ix, iz), b = h2(ix + 1, iz), c = h2(ix, iz + 1), d = h2(ix + 1, iz + 1);
+  return (a + (b - a) * ux + (c - a) * uz + (a - b - c + d) * ux * uz) * 2 - 1;
+}
+function vn3(x, y, z) {
+  const ix = floor(x), iy = floor(y), iz = floor(z), fx = x - ix, fy = y - iy, fz = z - iz;
+  const ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy), uz = fz * fz * (3 - 2 * fz);
+  const l = (a, b, t) => a + (b - a) * t;
+  const x0 = l(l(h3(ix, iy, iz), h3(ix + 1, iy, iz), ux), l(h3(ix, iy + 1, iz), h3(ix + 1, iy + 1, iz), ux), uy);
+  const x1 = l(l(h3(ix, iy, iz + 1), h3(ix + 1, iy, iz + 1), ux), l(h3(ix, iy + 1, iz + 1), h3(ix + 1, iy + 1, iz + 1), ux), uy);
+  return l(x0, x1, uz) * 2 - 1;
+}
+const fbm2 = (x, z, o = 4) => { let s = 0, a = 0.5, f = 1; for (let i = 0; i < o; i++) { s += a * vn2(x * f + i * 17.3, z * f - i * 9.1); f *= 2.03; a *= 0.5; } return s; };
+
+// small vector helpers (only used at load time)
+const v3 = (x, y, z) => [x, y, z];
+const vadd = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const vsub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const vmul = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+const vdot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const vcross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const vlen = (a) => hypot(a[0], a[1], a[2]);
+const vnorm = (a) => { const l = vlen(a) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+const vlerp = (a, b, t) => [mix(a[0], b[0], t), mix(a[1], b[1], t), mix(a[2], b[2], t)];
+const anyPerp = (d) => vnorm(abs(d[1]) < 0.9 ? vcross(d, [0, 1, 0]) : vcross(d, [1, 0, 0]));
+const rotAxis = (v, k, a) => { // Rodrigues
+  const c = cos(a), s = sin(a), d = vdot(k, v), x = vcross(k, v);
+  return [v[0] * c + x[0] * s + k[0] * d * (1 - c), v[1] * c + x[1] * s + k[1] * d * (1 - c), v[2] * c + x[2] * s + k[2] * d * (1 - c)];
+};
+
+// growable typed arrays
+class Grow {
+  constructor(T, n = 1 << 16) { this.T = T; this.a = new T(n); this.n = 0; }
+  need(k) { if (this.n + k > this.a.length) { let m = this.a.length * 2; while (m < this.n + k) m *= 2; const b = new this.T(m); b.set(this.a.subarray(0, this.n)); this.a = b; } }
+  push(v) { this.need(1); this.a[this.n++] = v; }
+  view() { return this.a.subarray(0, this.n); }
+}
+
+// ---------------------------------------------------------------- static geometry
+// Vertex (24 B): position f32x3 | normal snorm8x3 + ao | material unorm8x4 | sway unorm8x4
+//   material: r = material id, g = tint/variation, b = moss, a = wetness
+//   sway:     r = sway weight (×0.02 m per unit), g = phase, b = flex (fine motion), a = param
+// The world is split into CELL-sized cells; each cell's geometry is one contiguous index range, culled on the CPU.
+const CELL = 32, WH = 260, NCELL = Math.ceil((WH * 2) / CELL); // world spans [-WH, WH]
+const cellOf = (x, z) => clamp(floor((x + WH) / CELL), 0, NCELL - 1) + NCELL * clamp(floor((z + WH) / CELL), 0, NCELL - 1);
+const sn8 = (v) => (clamp(round(v * 127), -127, 127) & 255);
+const un8 = (v) => clamp(round(v * 255), 0, 255);
+class Geo {
+  constructor() {
+    this.f = new Grow(Float32Array, 1 << 22); // 6 words per vertex (3 floats + 3 packed u32 as float bits)
+    this.u = null;
+    this.idx = []; for (let i = 0; i < NCELL * NCELL; i++) this.idx.push(new Grow(Uint32Array, 1024));
+    this.nv = 0; this.cell = 0;
+    this.mat = 0; this.sway = 0; // current packed material / sway words
+    this._b = new ArrayBuffer(4); this._f = new Float32Array(this._b); this._u = new Uint32Array(this._b);
+  }
+  at(x, z) { this.cell = cellOf(x, z); return this; }
+  setMat(id, tint = 0.5, moss = 0, wet = 0) { this._u[0] = un8(id / 255) | (un8(tint) << 8) | (un8(moss) << 16) | (un8(wet) << 24); this.mat = this._f[0]; return this; }
+  setSway(w = 0, ph = 0, flex = 0, prm = 0) { this._u[0] = un8(clamp(w, 0, 1)) | (un8(ph % 1) << 8) | (un8(clamp(flex, 0, 1)) << 16) | (un8(clamp(prm, 0, 1)) << 24); this.sway = this._f[0]; return this; }
+  packN(nx, ny, nz, ao) { this._u[0] = sn8(nx) | (sn8(ny) << 8) | (sn8(nz) << 16) | (sn8(ao * 2 - 1) << 24); return this._f[0]; }
+  // vertex with explicit packed words (mat/sway default to current)
+  v(x, y, z, nx, ny, nz, ao = 1, mat = this.mat, sway = this.sway) {
+    const f = this.f; f.need(6); const a = f.a, o = f.n;
+    a[o] = x; a[o + 1] = y; a[o + 2] = z; a[o + 3] = this.packN(nx, ny, nz, ao); a[o + 4] = mat; a[o + 5] = sway; f.n += 6;
+    return this.nv++;
+  }
+  tri(a, b, c) { const g = this.idx[this.cell]; g.need(3); g.a[g.n++] = a; g.a[g.n++] = b; g.a[g.n++] = c; }
+  quad(a, b, c, d) { this.tri(a, b, c); this.tri(a, c, d); }
+  // generalised tube along points P[i] with radius R[i] (or function r(i,θ)), `sides` around; swayW(i) per ring
+  tube(P, R, sides, o = {}) {
+    const n = P.length, base = this.nv;
+    let T = vnorm(vsub(P[1], P[0])), N0 = anyPerp(T);
+    const frames = [];
+    for (let i = 0; i < n; i++) {
+      const Ti = i === 0 ? T : i === n - 1 ? vnorm(vsub(P[i], P[i - 1])) : vnorm(vsub(P[i + 1], P[i - 1]));
+      // parallel transport
+      const d = vdot(N0, Ti); N0 = vnorm(vsub(N0, vmul(Ti, d)));
+      frames.push([Ti, N0, vcross(Ti, N0)]);
+    }
+    const ring = sides + 1;
+    for (let i = 0; i < n; i++) {
+      const [Ti, Ni, Bi] = frames[i];
+      if (o.sway) o.sway(i, P[i]);
+      if (o.mat) o.mat(i, P[i]);
+      for (let k = 0; k <= sides; k++) {
+        const th = (k / sides) * TAU, c = cos(th), s = sin(th);
+        const r = typeof R === 'function' ? R(i, th) : R[i];
+        const dir = [Ni[0] * c + Bi[0] * s, Ni[1] * c + Bi[1] * s, Ni[2] * c + Bi[2] * s];
+        const p = vadd(P[i], vmul(dir, r));
+        let nn = dir;
+        if (typeof R === 'function') { // approximate normal including radius change around
+          const r2 = R(i, th + 0.05), dr = (r2 - r) / 0.05, tg = [-Ni[0] * s + Bi[0] * c, -Ni[1] * s + Bi[1] * c, -Ni[2] * s + Bi[2] * c];
+          nn = vnorm(vsub(dir, vmul(tg, dr / max(r, 0.05))));
+        }
+        const ao = o.ao ? o.ao(i, th, r) : 1;
+        this.v(p[0], p[1], p[2], nn[0], nn[1], nn[2], ao);
+      }
+    }
+    for (let i = 0; i < n - 1; i++) for (let k = 0; k < sides; k++) {
+      const a = base + i * ring + k, b = a + 1, c = a + ring + 1, d = a + ring;
+      this.quad(a, b, c, d);
+    }
+    if (o.cap) { // close the far end with a fan
+      const [Ti] = frames[n - 1], cidx = this.v(P[n - 1][0] + Ti[0] * 0.01, P[n - 1][1] + Ti[1] * 0.01, P[n - 1][2] + Ti[2] * 0.01, Ti[0], Ti[1], Ti[2], 1);
+      for (let k = 0; k < sides; k++) this.tri(base + (n - 1) * ring + k, base + (n - 1) * ring + k + 1, cidx);
+    }
+    return frames;
+  }
+  // box from a centre, half-extents and basis (ax, ay, az), with optional upward taper
+  box(c, hx, hy, hz, ax = [1, 0, 0], ay = [0, 1, 0], az = [0, 0, 1], taper = 1) {
+    const F = [[ax, 1], [ax, -1], [ay, 1], [ay, -1], [az, 1], [az, -1]];
+    const H = [hx, hy, hz], A = [ax, ay, az];
+    for (let f = 0; f < 6; f++) {
+      const ai = f >> 1, sgn = f & 1 ? -1 : 1, n = vmul(A[ai], sgn);
+      const u = A[(ai + 1) % 3], w = A[(ai + 2) % 3], hu = H[(ai + 1) % 3], hw = H[(ai + 2) % 3];
+      const ids = [];
+      for (const [su, sw] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+        let p = vadd(c, vadd(vmul(n, H[ai]), vadd(vmul(u, su * hu), vmul(w, sw * hw))));
+        // taper: points above centre shrink toward the axis
+        const up = vdot(vsub(p, c), ay);
+        if (taper !== 1 && up > 0) { const off = vsub(p, vadd(c, vmul(ay, up))); p = vadd(vadd(c, vmul(ay, up)), vmul(off, taper)); }
+        ids.push(this.v(p[0], p[1], p[2], n[0], n[1], n[2], f === 3 ? 0.55 : 1));
+      }
+      if (sgn > 0) this.quad(ids[0], ids[1], ids[2], ids[3]); else this.quad(ids[0], ids[3], ids[2], ids[1]);
+    }
+  }
+  // noise-displaced sphere (boulders, mushroom caps); returns nothing
+  blob(c, r, seed, o = {}) {
+    const sub = o.sub ?? 2, sq = o.squash ?? 1;
+    const { V, I } = icosphere(sub), base = this.nv, rr = RNG(seed), ox = rr() * 100, oy = rr() * 100, oz = rr() * 100;
+    const P = [];
+    const dsp = (d) => { const n = vn3(d[0] * 1.3 + ox, d[1] * 1.3 + oy, d[2] * 1.3 + oz) * 0.22 + vn3(d[0] * 3 + oy, d[1] * 3 + oz, d[2] * 3 + ox) * 0.08 + vn3(d[0] * 7 + oz, d[1] * 7, d[2] * 7) * 0.03; return 1 + n * (o.rough ?? 1); };
+    for (const d of V) { const s = dsp(d) * r; let y = d[1] * s * sq; if (o.flat && y < -r * o.flat) y = -r * o.flat + (y + r * o.flat) * 0.2; P.push([c[0] + d[0] * s * (o.sx ?? 1), c[1] + y, c[2] + d[2] * s * (o.sz ?? 1)]); }
+    // normals by accumulating faces
+    const N = V.map(() => [0, 0, 0]);
+    for (let i = 0; i < I.length; i += 3) { const a = P[I[i]], b = P[I[i + 1]], cc = P[I[i + 2]], n = vcross(vsub(b, a), vsub(cc, a)); for (let k = 0; k < 3; k++) { const q = N[I[i + k]]; q[0] += n[0]; q[1] += n[1]; q[2] += n[2]; } }
+    for (let i = 0; i < V.length; i++) { const n = vnorm(N[i]); const ao = o.ao ? o.ao(P[i], n) : clamp(0.55 + 0.45 * (V[i][1] + 1) * 0.6, 0, 1); this.v(P[i][0], P[i][1], P[i][2], n[0], n[1], n[2], ao); }
+    for (let i = 0; i < I.length; i += 3) this.tri(base + I[i], base + I[i + 1], base + I[i + 2]);
+  }
+  // lathe (surface of revolution) around an up axis: prof = [[r, y], ...]
+  lathe(c, prof, sides, ay = [0, 1, 0], rot = 0) {
+    const ax = anyPerp(ay), az = vcross(ax, ay), base = this.nv;
+    for (let i = 0; i < prof.length; i++) {
+      const [r, y] = prof[i], p0 = prof[max(i - 1, 0)], p1 = prof[min(i + 1, prof.length - 1)];
+      const dr = p1[0] - p0[0], dy = p1[1] - p0[1], ln = hypot(dr, dy) || 1, nr = dy / ln, ny = -dr / ln;
+      for (let k = 0; k <= sides; k++) {
+        const th = (k / sides) * TAU + rot, cx = cos(th), sz = sin(th);
+        const dir = vadd(vmul(ax, cx), vmul(az, sz));
+        const p = vadd(c, vadd(vmul(dir, r), vmul(ay, y))), n = vnorm(vadd(vmul(dir, nr), vmul(ay, ny)));
+        this.v(p[0], p[1], p[2], n[0], n[1], n[2], 1);
+      }
+    }
+    const ring = sides + 1;
+    for (let i = 0; i < prof.length - 1; i++) for (let k = 0; k < sides; k++) { const a = base + i * ring + k; this.quad(a, a + ring, a + ring + 1, a + 1); }
+  }
+}
+let _ico = {};
+function icosphere(sub) {
+  if (_ico[sub]) return _ico[sub];
+  const t = (1 + sqrt(5)) / 2;
+  let V = [[-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0], [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t], [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1]].map(vnorm);
+  let I = [0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11, 1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7, 1, 8, 3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9, 4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9, 8, 1];
+  for (let s = 0; s < sub; s++) {
+    const m = new Map(), J = [];
+    const mid = (a, b) => { const k = a < b ? a * 65536 + b : b * 65536 + a; let r = m.get(k); if (r === undefined) { r = V.length; V.push(vnorm(vlerp(V[a], V[b], 0.5))); m.set(k, r); } return r; };
+    for (let i = 0; i < I.length; i += 3) { const a = I[i], b = I[i + 1], c = I[i + 2], ab = mid(a, b), bc = mid(b, c), ca = mid(c, a); J.push(a, ab, ca, b, bc, ab, c, ca, bc, ab, bc, ca); }
+    I = J;
+  }
+  return (_ico[sub] = { V, I });
+}
+
+// ============================================================================
+// WGSL: shared prelude, scene shaders, post-processing
+// ============================================================================
+// Uniform layout (floats): 0 vp | 16 shadow | 32 cam.xyz,time | 36 right,tanX | 40 up,tanY | 44 fwd,near
+//   48 sun.xyz,exposure | 52 W,H,1/W,1/H | 56 lod,frame,fogLum,shaftK | 60 map ox,oz,1/size,mapH | 64 planes[6] | 88 misc
+const W_COMMON = /*wgsl*/`
+diagnostic(off, derivative_uniformity);
+struct U {
+  vp: mat4x4f, sm: mat4x4f,
+  cam: vec4f, right: vec4f, up: vec4f, fwd: vec4f,
+  sun: vec4f, scr: vec4f, prm: vec4f, wld: vec4f,
+  planes: array<vec4f, 6>, misc: vec4f, misc2: vec4f,
+}
+@group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(1) var sRep: sampler;
+@group(0) @binding(2) var sClamp: sampler;
+@group(0) @binding(3) var sCmp: sampler_comparison;
+@group(0) @binding(4) var tShadow: texture_depth_2d;
+@group(0) @binding(5) var tNoise: texture_3d<f32>;
+@group(0) @binding(6) var tMap: texture_2d<f32>;
+const PI = 3.14159265;
+const SUNC = vec3f(1.0, 0.82, 0.58) * 7.0;
+fn ih(x0: u32) -> u32 { var x = x0; x = (x ^ (x >> 16u)) * 0x7feb352du; x = (x ^ (x >> 15u)) * 0x846ca68bu; return x ^ (x >> 16u); }
+fn hf(x: u32) -> f32 { return f32(ih(x)) * (1.0 / 4294967295.0); }
+fn n3(p: vec3f) -> vec4f { return textureSampleLevel(tNoise, sRep, p, 0.0); }
+// world map: r ground height, g canopy optical depth, b canopy mid height, a water proximity
+fn mapAt(xz: vec2f) -> vec4f { return textureSampleLevel(tMap, sClamp, (xz - u.wld.xy) * u.wld.z, 0.0); }
+fn srgb(c: vec3f) -> vec3f { return pow(c, vec3f(2.2)); }
+fn lum(c: vec3f) -> f32 { return dot(c, vec3f(0.2126, 0.7152, 0.0722)); }
+// HDR values are stored compressed so the hardware MSAA resolve does not alias bright edges
+fn enc(c0: vec3f) -> vec4f { var c = max(c0, vec3f(0.0)); if (any(c != c) || any(c > vec3f(1e5))) { c = vec3f(0.0); } let m = max(c.r, max(c.g, c.b)); return vec4f(c / (1.0 + m), 1.0); }
+fn dec(c0: vec3f) -> vec3f { var c = max(c0, vec3f(0.0)); let m0 = max(c.r, max(c.g, c.b)); if (m0 > 0.95) { c *= 0.95 / m0; } let m = max(c.r, max(c.g, c.b)); return c / (1.0 - m); }
+fn windAt(p: vec3f, ph: f32) -> vec3f {
+  let t = u.cam.w;
+  let g = 0.6 + 0.4 * sin(t * 0.23 + dot(p.xz, vec2f(0.011, 0.007)));
+  let s = sin(t * 0.55 + ph * 6.283 + dot(p.xz, vec2f(0.021, 0.014))) * 0.6 + sin(t * 1.37 + ph * 17.0) * 0.22 + 0.35;
+  return (vec3f(0.82, 0.0, 0.57) * s + vec3f(-0.57, 0.0, 0.82) * sin(t * 0.71 + ph * 9.0) * 0.3) * g;
+}
+// sun visibility: static shadow map, 5-tap PCF, with a wind-driven wobble that keeps the dapples alive
+fn shadowAt(wp: vec3f, soft: f32) -> f32 {
+  let t = u.cam.w;
+  let j = (n3(wp * 0.031 + vec3f(t * 0.012, 0.0, t * 0.009)).xy - 0.5) * 0.22;
+  let p = wp + vec3f(j.x, 0.0, j.y);
+  let l = u.sm * vec4f(p, 1.0);
+  let uv = l.xy * vec2f(0.5, -0.5) + 0.5;
+  if (any(uv < vec2f(0.0)) || any(uv > vec2f(1.0))) { return 1.0; }
+  let z = l.z - 0.0004;
+  let o = soft / 8192.0;
+  var s = textureSampleCompareLevel(tShadow, sCmp, uv, z) * 2.0;
+  s += textureSampleCompareLevel(tShadow, sCmp, uv + vec2f(o, o * 0.4), z);
+  s += textureSampleCompareLevel(tShadow, sCmp, uv + vec2f(-o * 0.4, o), z);
+  s += textureSampleCompareLevel(tShadow, sCmp, uv + vec2f(-o, -o * 0.4), z);
+  s += textureSampleCompareLevel(tShadow, sCmp, uv + vec2f(o * 0.4, -o), z);
+  return s / 6.0;
+}
+// fraction of open sky above a point (canopy optical depth from the map, fading out above the crowns)
+fn skyVis(p: vec3f) -> f32 {
+  let m = mapAt(p.xz);
+  let above = smoothstep(m.b - 10.0, m.b + 14.0, p.y);
+  return exp(-m.g * (1.0 - above));
+}
+fn ambient(n: vec3f, p: vec3f) -> vec3f { return ambientV(n, skyVis(p)); }
+fn ambientV(n: vec3f, v: f32) -> vec3f {
+  let sky = vec3f(0.42, 0.62, 0.78) * (0.75 + 0.25 * n.y);
+  let leaf = vec3f(0.10, 0.17, 0.07) * (0.7 + 0.3 * n.y);   // light filtered through layers of leaves
+  let bounce = vec3f(0.05, 0.06, 0.03) * (0.6 - 0.4 * n.y);
+  return sky * v * 1.25 + leaf * (0.35 + 0.65 * sqrt(1.0 - v)) * (0.4 + 0.6 * v + 0.35) + bounce;
+}
+// analytic height fog: warm golden-green close by, cool blue-green far away
+fn fogT(p: vec3f) -> f32 {
+  let d = p - u.cam.xyz; let dist = length(d); let rd = d / max(dist, 1e-3);
+  let b = 1.0 / 22.0;
+  let a = u.misc.x * exp(-b * (u.cam.y - u.misc.y));
+  let k = rd.y * b;
+  let tau = select(a * dist, a * (1.0 - exp(-k * dist)) / k, abs(k) > 1e-4);
+  return exp(-tau - max(dist - 150.0, 0.0) * 0.004);
+}
+fn fogCol(rd: vec3f, dist: f32) -> vec3f {
+  let warm = vec3f(0.34, 0.40, 0.20);
+  let cool = vec3f(0.09, 0.19, 0.25);
+  var c = mix(warm, cool, 1.0 - exp(-dist / 55.0));
+  let mu = max(dot(rd, u.sun.xyz), 0.0);
+  c += vec3f(1.0, 0.75, 0.42) * (pow(mu, 8.0) * 0.3 + pow(mu, 40.0) * 0.5);
+  return c * u.prm.z;
+}
+fn fogApply(c: vec3f, p: vec3f) -> vec3f {
+  let d = p - u.cam.xyz; let dist = length(d);
+  let T = fogT(p);
+  return c * T + fogCol(d / max(dist, 1e-3), dist) * (1.0 - T);
+}
+fn hg(mu: f32, g: f32) -> f32 { let g2 = g * g; return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0 * g * mu, 1.5)); }
+fn sky(rd: vec3f) -> vec3f {
+  let y = max(rd.y, 0.0);
+  var c = mix(vec3f(0.95, 1.05, 1.05), vec3f(0.30, 0.55, 1.1), pow(y, 0.45)) * 1.7;
+  let mu = dot(rd, u.sun.xyz);
+  c += vec3f(1.0, 0.85, 0.6) * (pow(max(mu, 0.0), 6.0) * 2.5 + pow(max(mu, 0.0), 64.0) * 6.0);
+  c += vec3f(1.0, 0.9, 0.7) * smoothstep(0.99975, 0.99985, mu) * 60.0;
+  return c;
+}
+`;
+
+// ---------------------------------------------------------------- noise texture bake (compute)
+const W_NOISE = /*wgsl*/`
+@group(0) @binding(0) var dst: texture_storage_3d<rgba8unorm, write>;
+fn ih(x0: u32) -> u32 { var x = x0; x = (x ^ (x >> 16u)) * 0x7feb352du; x = (x ^ (x >> 15u)) * 0x846ca68bu; return x ^ (x >> 16u); }
+fn grad(c: vec3i, per: i32) -> vec3f {
+  let w = ((c % per) + per) % per;
+  let h = ih((u32(w.x) * 73856093u) ^ (u32(w.y) * 19349663u) ^ (u32(w.z) * 83492791u + u32(per) * 7919u));
+  let a = f32(h & 1023u) / 1023.0 * 6.2831853; let z = f32((h >> 10u) & 1023u) / 1023.0 * 2.0 - 1.0; let r = sqrt(1.0 - z * z);
+  return vec3f(r * cos(a), r * sin(a), z);
+}
+fn pn(p: vec3f, per: i32) -> f32 {
+  let i = vec3i(floor(p)); let f = fract(p); let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  var acc = 0.0;
+  let n000 = dot(grad(i, per), f); let n100 = dot(grad(i + vec3i(1, 0, 0), per), f - vec3f(1, 0, 0));
+  let n010 = dot(grad(i + vec3i(0, 1, 0), per), f - vec3f(0, 1, 0)); let n110 = dot(grad(i + vec3i(1, 1, 0), per), f - vec3f(1, 1, 0));
+  let n001 = dot(grad(i + vec3i(0, 0, 1), per), f - vec3f(0, 0, 1)); let n101 = dot(grad(i + vec3i(1, 0, 1), per), f - vec3f(1, 0, 1));
+  let n011 = dot(grad(i + vec3i(0, 1, 1), per), f - vec3f(0, 1, 1)); let n111 = dot(grad(i + vec3i(1, 1, 1), per), f - vec3f(1, 1, 1));
+  return mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y), mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z);
+}
+fn cell(p: vec3f, per: i32) -> f32 {
+  let i = vec3i(floor(p)); let f = fract(p); var d = 9.0;
+  for (var z = -1; z <= 1; z++) { for (var y = -1; y <= 1; y++) { for (var x = -1; x <= 1; x++) {
+    let o = vec3i(x, y, z); let w = (((i + o) % per) + per) % per;
+    let h = ih(u32(w.x) * 7u + u32(w.y) * 1013u + u32(w.z) * 104729u + 99u);
+    let r = vec3f(f32(h & 255u), f32((h >> 8u) & 255u), f32((h >> 16u) & 255u)) / 255.0;
+    d = min(d, length(vec3f(o) + r - f));
+  } } }
+  return d;
+}
+@compute @workgroup_size(4, 4, 4) fn main(@builtin(global_invocation_id) id: vec3u) {
+  let p = vec3f(id) / 128.0;
+  let a = pn(p * 8.0, 8) * 0.5 + pn(p * 16.0, 16) * 0.25 + pn(p * 32.0, 32) * 0.125;
+  let b = pn(p * 16.0 + 3.0, 16) * 0.6 + pn(p * 32.0 + 3.0, 32) * 0.3;
+  let c = pn(p * 32.0 + 7.0, 32) * 0.6 + pn(p * 64.0 + 7.0, 64) * 0.35;
+  let d = cell(p * 16.0, 16);
+  textureStore(dst, id, vec4f(a * 1.1 + 0.5, b * 0.9 + 0.5, c * 0.9 + 0.5, clamp(d, 0.0, 1.0)));
+}`;
+
+// ---------------------------------------------------------------- static geometry (terrain, trunks, rocks, set pieces)
+const W_SOLID = W_COMMON + /*wgsl*/`
+override SHADOW: bool = false;
+override CHEAP: bool = false;
+struct VI { @location(0) p: vec3f, @location(1) n: vec4f, @location(2) m: vec4f, @location(3) s: vec4f }
+struct VO { @builtin(position) pos: vec4f, @location(0) wp: vec3f, @location(1) n: vec3f, @location(2) @interpolate(flat) m: vec4f, @location(3) ao: f32, @location(4) s: vec4f }
+fn sway(p: vec3f, s: vec4f) -> vec3f {
+  var o = windAt(p, s.y) * s.x * 1.2;
+  o += vec3f(sin(u.cam.w * 2.1 + s.y * 40.0 + p.y * 0.7), 0.0, cos(u.cam.w * 1.7 + s.y * 31.0 + p.y * 0.5)) * s.z * 0.06;
+  return o;
+}
+@vertex fn vs(i: VI) -> VO {
+  var o: VO;
+  let wp = i.p + sway(i.p, i.s);
+  o.pos = u.vp * vec4f(wp, 1.0);
+  o.wp = wp; o.n = i.n.xyz; o.ao = i.n.w * 0.5 + 0.5; o.m = i.m; o.s = i.s;
+  return o;
+}
+@fragment fn fsShadow() {}
+fn bump(p: vec3f, n: vec3f, k: f32, fw: f32) -> vec3f {
+  let a = n3(p * 0.37).xyz - 0.5;
+  let fade = clamp(1.0 - fw * 3.0, 0.0, 1.0);
+  var b = vec3f(0.0); if (fade > 0.0) { b = n3(p * 1.9).xyz - 0.5; }
+  return normalize(n + (a * 0.6 + b * 0.5 * fade) * k);
+}
+struct Mat { alb: vec3f, n: vec3f, rough: f32, spec: f32, sss: f32 }
+// two rotated, incommensurate samples: hides the period of the noise texture
+fn nt(p: vec3f) -> vec4f {
+  let q = vec3f(p.x * 0.8 - p.z * 0.6, p.y, p.x * 0.6 + p.z * 0.8) * 1.371 + vec3f(0.31, 0.17, 0.53);
+  let a = (n3(p) + n3(q)) * 0.5;
+  return clamp(a * 1.45 - 0.225, vec4f(0.0), vec4f(1.0));
+}
+// fallen leaves: three layers of randomly rotated leaf shapes on a jittered grid
+fn litter(p: vec2f, fw: f32) -> vec4f {
+  var col = vec3f(0.0); var m = 0.0;
+  for (var l = 0; l < 3; l++) {
+    let sc = 5.0 + f32(l) * 1.9;
+    let q = p * sc + vec2f(f32(l) * 17.3, f32(l) * 7.1);
+    let c = vec2i(floor(q)); let f = fract(q) - 0.5;
+    let h = ih((u32(c.x + 65536) * 7919u) ^ (u32(c.y + 65536) * 104729u) ^ (u32(l) * 2654435761u));
+    let a = f32(h & 1023u) / 1023.0 * 6.283;
+    let off = (vec2f(f32((h >> 10u) & 255u), f32((h >> 18u) & 255u)) / 255.0 - 0.5) * 0.3;
+    let r = mat2x2f(cos(a), sin(a), -sin(a), cos(a)) * (f - off);
+    let e = length(r * vec2f(1.0 / 0.44, 1.0 / (0.17 + 0.06 * f32((h >> 7u) & 7u) / 7.0)));
+    let d = (1.0 - e) * 0.17 / sc;
+    let cov = clamp(d / max(fw * 0.7, 1e-4) + 0.5, 0.0, 1.0) * step(f32((h >> 26u) & 63u) / 63.0, 0.9);
+    let k = f32((h >> 3u) & 63u) / 63.0;
+    var lc = mix(vec3f(0.14, 0.065, 0.028), vec3f(0.24, 0.13, 0.05), k);
+    if (k > 0.78) { lc = vec3f(0.05, 0.03, 0.015); } else if (k < 0.1) { lc = vec3f(0.30, 0.20, 0.05); } else if (k < 0.16) { lc = vec3f(0.12, 0.13, 0.04); }
+    lc *= 0.8 + 0.35 * smoothstep(0.0, 0.25, abs(r.y) * sc * 2.0) - 0.25 * (1.0 - e);
+    col = mix(col, lc, cov); m = max(m, cov);
+  }
+  // far away the pattern dissolves into its average colour
+  let fade = smoothstep(0.004, 0.02, fw);
+  return vec4f(mix(col, vec3f(0.13, 0.07, 0.03), fade), mix(m, 0.85, fade));
+}
+@fragment fn fs(i: VO, @builtin(front_facing) ff: bool) -> @location(0) vec4f {
+  if (CHEAP) { return enc(abs(i.n) * 0.3); }
+  let p = i.wp; var n0 = normalize(i.n); if (!ff) { n0 = -n0; }
+  let fw = length(fwidth(p));
+  let id = u32(i.m.x * 255.0 + 0.5); let tint = i.m.y; var moss = i.m.z; let wet0 = i.m.w;
+  let nA = nt(p * 0.045); let nB = nt(p * 0.19); let nC = n3(p * 0.83);
+  let fade = clamp(1.0 - fw * 2.5, 0.0, 1.0);
+  var m: Mat; m.n = n0; m.rough = 0.8; m.spec = 0.03; m.sss = 0.0;
+  var wet = wet0;
+  if (id == 0u) {
+    // terrain: leaf litter over dark soil on gentle ground, limestone on steep ground, moss in between
+    let rocky = max(smoothstep(0.8, 0.52, n0.y + (nB.x - 0.5) * 0.35), tint * smoothstep(0.95, 0.7, n0.y));
+    var soil = mix(vec3f(0.045, 0.03, 0.018), vec3f(0.08, 0.05, 0.028), nA.x);
+    var lt = vec4f(0.13, 0.07, 0.03, 0.85); if (fw < 0.02) { lt = litter(p.xz, fw); }
+    soil = mix(soil, lt.rgb, lt.a * (0.55 + 0.45 * smoothstep(0.3, 0.6, nA.z)));
+    let gm = smoothstep(0.5, 0.75, nA.y + nB.y * 0.3) * smoothstep(0.6, 0.9, n0.y);
+    soil = mix(soil, vec3f(0.04, 0.07, 0.02) * (0.7 + 0.6 * nC.y), gm * 0.6);
+    // limestone: grey with dark vertical rain streaks, green algae and orange iron stains
+    let streak = n3(vec3f(p.x * 0.035, p.y * 0.004, p.z * 0.035)).x;
+    let big = n3(p * 0.006).x;
+    var rock = mix(vec3f(0.12, 0.12, 0.11), vec3f(0.22, 0.215, 0.19), smoothstep(0.3, 0.7, big)) * (0.85 + 0.3 * nB.x);
+    rock = mix(rock, vec3f(0.03, 0.035, 0.03), smoothstep(0.45, 0.65, streak) * 0.9);
+    rock = mix(rock, vec3f(0.12, 0.16, 0.08), smoothstep(0.5, 0.7, nA.y) * 0.45);
+    rock = mix(rock, vec3f(0.30, 0.18, 0.09), smoothstep(0.64, 0.8, nA.z) * 0.45);
+    rock *= 0.7 + 0.6 * nC.x * fade + 0.3 * (1.0 - fade);
+    let ledge = smoothstep(0.3, 0.7, n0.y) * smoothstep(0.3, 0.55, nA.w + nB.z * 0.5);
+    moss = max(moss, ledge * 0.95 + smoothstep(0.55, 0.8, nA.y) * 0.35 * (1.0 - smoothstep(0.0, 0.5, -n0.y)));
+    m.alb = mix(soil, rock, rocky);
+    m.n = bump(p, n0, mix(0.3, 0.55, rocky), fw);
+    wet = max(wet, 0.2 * (1.0 - rocky));
+    m.rough = mix(0.85, 0.55, rocky);
+    moss = moss * mix(0.5, 1.0, rocky);
+  } else if (id <= 4u || id == 12u) {
+    // bark: 1 pale dipterocarp, 2 dark wet, 3 banyan, 4 reddish, 12 palm / tree-fern trunk
+    let fiss = n3(vec3f(p.x * 0.35, p.y * 0.03, p.z * 0.35)).x;
+    var b = vec3f(0.22, 0.20, 0.16);
+    if (id == 2u) { b = vec3f(0.07, 0.055, 0.04); }
+    if (id == 3u) { b = vec3f(0.19, 0.18, 0.15); }
+    if (id == 4u) { b = vec3f(0.17, 0.08, 0.045); }
+    if (id == 12u) { b = vec3f(0.06, 0.045, 0.03); }
+    b *= 0.75 + 0.5 * tint;
+    b *= 0.8 + 0.4 * nB.y;
+    b = mix(b, b * 0.45, smoothstep(0.45, 0.65, fiss) * fade);
+    // lichen blotches (white / mint) on the pale trunks
+    let lich = smoothstep(0.62, 0.72, n3(p * 0.33 + 5.0).z) * select(0.35, 0.9, id == 1u || id == 3u);
+    b = mix(b, mix(vec3f(0.36, 0.37, 0.31), vec3f(0.2, 0.3, 0.22), nC.y), lich);
+    m.alb = b;
+    m.n = bump(p, n0, 0.55, fw);
+    // moss: thick at the base and on upward faces
+    moss = max(moss, smoothstep(0.1, 0.9, n0.y + nA.y * 0.6 - 0.2) * 0.8);
+    m.rough = 0.8;
+  } else if (id == 5u) {
+    var r = mix(vec3f(0.17, 0.17, 0.155), vec3f(0.27, 0.26, 0.24), nB.x) * (0.8 + 0.4 * nC.y * fade);
+    r = mix(r, vec3f(0.07, 0.07, 0.065), smoothstep(0.55, 0.75, n3(vec3f(p.x * 0.06, p.y * 0.012, p.z * 0.06)).x) * 0.6);
+    m.alb = r * (0.8 + 0.4 * tint); m.n = bump(p, n0, 0.5, fw); m.rough = 0.55;
+    moss = max(moss, smoothstep(0.2, 0.8, n0.y + nA.y * 0.5 - 0.1));
+  } else if (id == 6u) {
+    // shrine stone: weathered grey-brown blocks, black water stains, lichen
+    var r = mix(vec3f(0.17, 0.155, 0.13), vec3f(0.26, 0.24, 0.2), nB.x) * (0.75 + 0.5 * nC.x * fade);
+    r = mix(r, vec3f(0.05, 0.05, 0.045), smoothstep(0.5, 0.75, n3(vec3f(p.x * 0.12, p.y * 0.025, p.z * 0.12)).x) * 0.7);
+    r = mix(r, vec3f(0.34, 0.33, 0.26), smoothstep(0.7, 0.8, nC.z) * 0.6);
+    m.alb = r * (0.85 + 0.3 * tint); m.n = bump(p, n0, 0.4, fw); m.rough = 0.7;
+    moss = max(moss, smoothstep(0.25, 0.85, n0.y + nA.y * 0.7 - 0.25));
+  } else if (id == 7u) {
+    // weathered wood: grey, grain along the plank
+    let grain = n3(vec3f(p.x * 0.2, p.y * 3.0, p.z * 3.0)).x;
+    m.alb = mix(vec3f(0.10, 0.085, 0.065), vec3f(0.2, 0.18, 0.15), grain) * (0.7 + 0.5 * tint);
+    m.n = bump(p, n0, 0.25, fw); m.rough = 0.8;
+    moss = max(moss, smoothstep(0.55, 0.8, nA.y) * 0.6 * smoothstep(0.3, 0.9, n0.y));
+  } else if (id == 8u) {
+    // rope, liana
+    m.alb = mix(vec3f(0.07, 0.05, 0.03), vec3f(0.16, 0.12, 0.07), tint) * (0.8 + 0.4 * nC.x);
+    m.rough = 0.9;
+  } else if (id == 9u) {
+    // bamboo culm: green to yellow, darker node bands carried by tint
+    let g = mix(vec3f(0.07, 0.14, 0.025), vec3f(0.26, 0.24, 0.05), i.s.w);
+    m.alb = g * (0.75 + 0.5 * nB.x) * (0.45 + 0.55 * tint);
+    m.rough = 0.35; m.spec = 0.06;
+    moss = 0.0;
+  } else if (id == 10u) {
+    // mushroom: tint selects the colour family
+    let c = select(select(vec3f(0.85, 0.80, 0.70), vec3f(0.85, 0.45, 0.12), tint > 0.33), vec3f(0.65, 0.42, 0.22), tint > 0.66);
+    m.alb = c * (0.8 + 0.3 * nC.x); m.rough = 0.5; m.sss = 0.3; moss = 0.0;
+  } else if (id == 11u) {
+    m.alb = vec3f(0.16, 0.12, 0.08); m.n = bump(p, n0, 0.6, fw); moss = max(moss, 0.75 + 0.25 * nA.y);
+  } else {
+    m.alb = vec3f(0.5);
+  }
+  // moss layer: deep to bright green, fuzzy
+  let mc = mix(vec3f(0.03, 0.065, 0.015), vec3f(0.085, 0.16, 0.035), nB.z) * (0.75 + 0.5 * nC.y * fade);
+  let mk = smoothstep(0.35, 0.65, moss + (nB.z - 0.5) * 0.5 + (nA.x - 0.5) * 0.4 + (nC.y - 0.5) * 0.15);
+  m.alb = mix(m.alb, mc, mk);
+  m.n = normalize(mix(m.n, n0, mk * 0.5));
+  m.rough = mix(m.rough, 0.95, mk);
+  // wetness darkens and adds gloss
+  wet = clamp(wet + 0.15, 0.0, 1.0);
+  m.alb *= 1.0 - 0.35 * wet;
+  m.rough = mix(m.rough, 0.25, wet * (1.0 - mk * 0.7));
+  // lighting
+  let L = u.sun.xyz; let V = normalize(u.cam.xyz - p);
+  let ndl = dot(m.n, L);
+  var sh = 0.0; if (dot(n0, L) > -0.2) { sh = shadowAt(p + n0 * 0.08, 1.6); }
+  let diff = max(ndl, 0.0) * sh;
+  let H = normalize(L + V);
+  let sp = pow(max(dot(m.n, H), 0.0), 2.0 / (m.rough * m.rough * m.rough + 0.002)) * (1.0 - m.rough) * 0.6 * sh;
+  let f = 0.04 + 0.96 * pow(1.0 - max(dot(m.n, V), 0.0), 5.0);
+  let sv = skyVis(p);
+  let amb = ambientV(m.n, sv) * i.ao;
+  let R = reflect(-V, m.n);
+  let env = ambientV(R, sv) * f * (1.0 - m.rough) * (1.0 - m.rough) * 0.8 * i.ao;
+  var c = m.alb * (SUNC * diff + amb) + SUNC * sp * (0.04 + f) + env;
+  c += m.alb * SUNC * m.sss * sh * max(-ndl, 0.0) * 0.3;
+  return enc(fogApply(c, p));
+}`;
+
+// ---------------------------------------------------------------- foliage (instanced cards with analytic leaf shapes)
+// instance: f32 x,y,z,size | fwd.xyz,droop | faceN.xyz,ao | bend.xyz,swayW | rgb565, variant:4, phase:6, aspect:6
+const W_LEAF = W_COMMON + /*wgsl*/`
+override KIND: u32 = 0;
+override ROWS: u32 = 4;
+override SHADOW: bool = false;
+override VBASE: u32 = 0;
+override VREV: bool = false;
+override DFULL: f32 = 40.0;
+override DMIN: f32 = 0.3;
+override DMAX: f32 = 300.0;
+@group(1) @binding(0) var<storage, read> inst: array<vec4u>;
+@group(1) @binding(1) var<storage, read> vis: array<u32>;
+struct VO {
+  @builtin(position) pos: vec4f, @location(0) uv: vec2f, @location(1) wp: vec3f, @location(2) n: vec3f,
+  @location(3) @interpolate(flat) col: vec4f, @location(4) @interpolate(flat) bend: vec4f, @location(5) @interpolate(flat) kv: vec4f,
+}
+fn aspect() -> f32 {
+  switch (KIND) { case 0u: { return 0.62; } case 1u: { return 0.5; } case 2u: { return 0.34; } case 3u: { return 0.42; } default: { return 1.0; } }
+}
+// outline: half width (in leaf lengths) at position v along the leaf
+fn outline(v: f32, var_: u32) -> f32 {
+  let a = aspect();
+  switch (KIND) {
+    case 0u: { return a * 0.5 * (0.55 + 0.45 * sin(PI * clamp(v * 0.9 + 0.1, 0.0, 1.0))); }
+    case 1u: {
+      if (var_ == 1u) { return a * 0.62 * pow(sin(PI * clamp(v * 0.85 + 0.15, 0.0, 1.0)), 0.6); }
+      if (var_ == 2u) { return a * 0.55 * pow(sin(PI * clamp(v, 0.0, 1.0)), 0.45); }
+      if (var_ == 3u) { return a * 0.26 * pow(sin(PI * clamp(v, 0.0, 1.0)), 0.5); }
+      return a * 0.5 * pow(sin(PI * clamp(v, 0.0, 1.0)), 0.75);
+    }
+    case 2u: { return a * 0.5 * (1.0 - 0.75 * v) * smoothstep(0.0, 0.12, v) + 0.01; }
+    case 3u: { return a * 0.5 * pow(sin(PI * clamp(v, 0.0, 1.0)), 0.7); }
+    default: { return 0.5; }
+  }
+}
+@vertex fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VO {
+  var o: VO;
+  var id = ii; var keep = 1.0;
+  if (!SHADOW) { id = vis[select(VBASE + ii, VBASE - ii, VREV)]; }
+  let w0 = inst[id * 2u]; let w1 = inst[id * 2u + 1u];
+  let base = bitcast<vec3f>(w0.xyz); var size = bitcast<f32>(w0.w);
+  let fa = unpack4x8snorm(w1.x); let fb = unpack4x8snorm(w1.y); let fc = unpack4x8snorm(w1.z);
+  let var_ = (w1.w >> 16u) & 15u; let ph = f32((w1.w >> 20u) & 63u) / 63.0; let asp = 0.6 + f32((w1.w >> 26u) & 63u) / 63.0 * 0.8;
+  if (!SHADOW) {
+    // density LOD: far clusters draw a random subset, the survivors grow to keep the coverage
+    let d = distance(base, u.cam.xyz) * u.prm.x;
+    let f = clamp(pow(DFULL / max(d, 1.0), 1.6), DMIN, 1.0);
+    let k = f * smoothstep(DMAX, DMAX * 0.7, d) * 64.0; let li = f32(id & 63u);
+    keep = clamp((k - li) / 3.0, 0.0, 1.0);
+    size *= keep * min(inverseSqrt(f), 1.8);
+    if (keep <= 0.0) { o.pos = vec4f(0.0, 0.0, -1.0, 1.0); return o; }
+  }
+  var fwd = normalize(fa.xyz); let droop = fa.w;
+  var nf = normalize(fb.xyz - fwd * dot(fb.xyz, fwd));
+  let side = cross(nf, fwd);
+  // corner of the strip: ROWS rows, two halves (left/right of the midrib)
+  // indexed grid: (ROWS+1) rows of 3 vertices (left edge, midrib, right edge)
+  let v = f32(vi / 3u) / f32(ROWS);
+  let us = f32(vi % 3u) - 1.0; // -1..1 across
+  let hs = 0.5 / f32(ROWS);
+  let gw = max(max(outline(v, var_), outline(clamp(v - hs, 0.0, 1.0), var_)), outline(clamp(v + hs, 0.0, 1.0), var_)) * asp + 0.02;
+  let x = us * gw;
+  // wind: the whole card sways with its plant, the blade flutters around its midrib
+  let t = u.cam.w;
+  let sw = windAt(base, ph) * (fc.w * 0.5 + 0.5) * 1.2;
+  let fl = sin(t * (5.0 + ph * 4.0) + ph * 40.0 + base.y) * 0.18 + sin(t * 2.3 + ph * 13.0) * 0.1;
+  var lp = base + sw;
+  let down = vec3f(0.0, -1.0, 0.0);
+  let along = v * size;
+  lp += fwd * along * (1.0 - abs(droop) * v * 0.35) + down * droop * size * v * v * 0.6;
+  let fold = select(0.18, 0.08, KIND == 0u);
+  lp += side * (x * size) + nf * (abs(x) * size * fold + x * size * fl * v * 0.6);
+  if (KIND == 4u) { lp = base + sw + fwd * (us * 0.5 * size * asp) + side * ((v - 0.5) * size); }
+  let nn = normalize(nf - side * sign(us) * fold * 1.5 + fwd * droop * v * 0.6);
+  o.pos = u.vp * vec4f(lp, 1.0);
+  o.wp = lp; o.n = nn;
+  o.uv = vec2f(x / max(asp, 0.01), v);
+  if (KIND == 4u) { o.uv = vec2f(us, v * 2.0 - 1.0); }
+  let rgb = vec3f(f32((w1.w >> 11u) & 31u) / 31.0, f32((w1.w >> 5u) & 63u) / 63.0, f32(w1.w & 31u) / 31.0);
+  o.col = vec4f(rgb, fb.w * 0.5 + 0.5);
+  o.bend = vec4f(fc.xyz, ph);
+  o.kv = vec4f(f32(var_), asp, size, keep);
+  return o;
+}
+// signed coverage of one elliptic leaflet with a drip tip: base b, direction d, length l, half width w
+fn leaflet(p: vec2f, b: vec2f, d: vec2f, l: f32, w: f32) -> f32 {
+  let q = p - b; let a = dot(q, d) / l; let c = abs(q.x * d.y - q.y * d.x);
+  if (a < 0.0 || a > 1.0) { return -0.05; }
+  let prof = pow(sin(PI * a), 0.7) * (1.0 - 0.25 * a) * smoothstep(1.0, 0.82, a) + smoothstep(0.8, 1.0, a) * 0.03 * (1.0 - a) * 10.0 * 0.0;
+  return w * prof - c;
+}
+struct Shape { d: f32, vein: f32, tone: f32 }
+fn shape(uv: vec2f, var_: u32, asp: f32, ph: f32) -> Shape {
+  var s: Shape; s.vein = 0.0; s.tone = 0.0;
+  let X = uv.x * asp; let Y = uv.y; // metric coordinates in leaf lengths
+  switch (KIND) {
+    case 0u: {
+      // twig spray: alternate leaflets along a stem plus a terminal leaf
+      // far cards (VREV) use half as many, wider leaflets: same coverage, half the cost
+      var d = -1.0; let n = select(select(6, 9, var_ == 1u), select(3, 4, var_ == 1u), VREV);
+      let L = select(0.42, 0.34, var_ == 1u); let Wd = select(0.11, 0.045, var_ == 1u) * select(1.0, 1.7, VREV);
+      for (var k = 0; k < n; k++) {
+        let fk = f32(k) * select(1.0, 2.0, VREV); let sd = select(-1.0, 1.0, (k & 1) == 0);
+        let vy = 0.08 + fk * select(0.1, 0.075, var_ == 1u);
+        let ang = select(0.85, 0.65, var_ == 1u) - fk * 0.04 + sin(ph * 30.0 + fk) * 0.15;
+        let dd = vec2f(sd * sin(ang), cos(ang));
+        d = max(d, leaflet(vec2f(X, Y), vec2f(0.0, vy), dd, L * (1.0 - fk * 0.03), Wd));
+      }
+      d = max(d, leaflet(vec2f(X, Y), vec2f(0.0, select(0.6, 0.64, var_ == 1u)), vec2f(0.0, 1.0), select(0.4, 0.36, var_ == 1u), Wd));
+      s.d = d;
+      s.vein = smoothstep(0.012, 0.0, abs(X)) * step(Y, 0.7);
+    }
+    case 1u: {
+      let w = outline(Y, var_) / 0.5 * 0.5 * asp;
+      var d = w - abs(X);
+      if (var_ == 3u) { d += sin(Y * 60.0) * 0.004; }
+      if (var_ == 0u) { // occasional insect bite holes
+        let hc = vec2f(X, Y) * 18.0; let hid = floor(hc);
+        let r = hf(u32(hid.x + 50.0) * 131u + u32(hid.y + 50.0) * 977u + u32(ph * 1000.0));
+        if (r > 0.93) { d = min(d, length(fract(hc) - 0.5) / 18.0 - 0.016); }
+      }
+      s.d = d;
+      s.vein = smoothstep(0.01, 0.0, abs(X)) + smoothstep(0.08, 0.0, abs(fract((Y - abs(X) * 0.9) * 9.0) - 0.5)) * 0.35;
+      s.tone = abs(X) / max(w, 1e-3);
+    }
+    case 2u: {
+      // pinnate frond: lanceolate pinnae angled toward the tip; fern pinnae are lobed, fishtail-palm leaflets are wedges
+      let N = select(select(26.0, 11.0, var_ == 1u), 18.0, var_ == 2u);
+      let ax = abs(X);
+      let ang = select(select(0.35, 0.25, var_ == 1u), 0.75, var_ == 2u);
+      let yy = (Y - ax * ang) * N; let k = floor(yy); let fy = abs(fract(yy) - 0.5);
+      let yk = (k + 0.5) / N;
+      let len = 0.2 * pow(max(1.0 - yk, 0.0), 0.7) * smoothstep(-0.05, 0.12, yk) * select(1.0, 0.85, var_ == 1u) + 0.002;
+      let s0 = clamp(ax / len, 0.0, 1.0);
+      var w = 0.44 * pow(1.0 - s0, 0.55) * smoothstep(0.0, 0.08, s0 + 0.05);
+      if (var_ == 0u) { w *= 0.72 + 0.28 * abs(sin(s0 * 22.0)); }
+      if (var_ == 1u) { w = (0.12 + 0.36 * s0) * step(s0, 0.97 - 0.15 * abs(sin(yy * 3.1 + ph * 20.0))); }
+      if (var_ == 2u) { w = 0.2 * pow(1.0 - s0, 0.4); }
+      s.d = min((w - fy) / N, (len - ax) * 0.5);
+      s.d = max(s.d, 0.0045 - ax);
+      s.vein = smoothstep(0.006, 0.0, ax) + smoothstep(0.08, 0.0, fy) * 0.25;
+      s.tone = s0;
+    }
+    case 3u: {
+      let w = outline(Y, var_) * asp;
+      s.d = w - abs(X);
+      s.vein = smoothstep(0.01, 0.0, abs(X));
+      s.tone = abs(X) / max(w, 1e-3);
+    }
+    default: {
+      // flower: radial petals around a bright centre
+      let r = length(uv); let a = atan2(uv.y, uv.x);
+      let np = select(5.0, 6.0, var_ == 1u);
+      let pet = 0.62 + 0.38 * pow(abs(cos(a * np * 0.5 + ph * 6.0)), select(1.5, 0.6, var_ == 1u));
+      s.d = (pet * 0.95 - r) * 0.5;
+      s.tone = r;
+      s.vein = smoothstep(0.25, 0.1, r);
+    }
+  }
+  return s;
+}
+@fragment fn fsShadow(i: VO) {
+  let s = shape(i.uv, u32(i.kv.x), i.kv.y, i.bend.w);
+  if (s.d < 0.0) { discard; }
+}
+@fragment fn fs(i: VO, @builtin(front_facing) ff: bool) -> @location(0) vec4f {
+  let var_ = u32(i.kv.x);
+  let s = shape(i.uv, var_, i.kv.y, i.bend.w);
+  let px = max(fwidth(s.d), 1e-5);
+  let cov = clamp(s.d / px + 0.5, 0.0, 1.0);
+  if (cov <= 0.0) { discard; }
+  var alb = srgb(i.col.rgb);
+  let lv = hf(u32(i.bend.w * 4093.0) + u32(i.kv.z * 977.0));
+  let mot = n3(i.wp * 0.9).y;
+  alb *= (0.8 + 0.4 * lv) * (0.85 + 0.3 * mot) * (1.0 + s.vein * 0.3 - s.tone * 0.15) * (0.82 + 0.18 * smoothstep(0.0, 0.6, i.uv.y));
+  if (KIND == 4u) {
+    alb = mix(alb, vec3f(1.0, 0.85, 0.35), s.vein * 0.85);
+  }
+  // underside of a blade: paler, less saturated
+  if (!ff && KIND != 4u) { alb = mix(alb, vec3f(lum(alb)), 0.25) * 1.25; }
+  let p = i.wp;
+  var n = normalize(i.n); if (!ff) { n = -n; }
+  let bend = i.bend.xyz;
+  let bn = normalize(n * 0.6 + bend * 0.8 + vec3f(0.0, 0.1, 0.0));
+  let L = u.sun.xyz; let V = normalize(u.cam.xyz - p);
+  let sh = shadowAt(p + L * 0.35 + bn * 0.08, 1.6);
+  let ndl = dot(bn, L);
+  let diff = clamp(ndl * 0.85 + 0.15, 0.0, 1.0) * sh;
+  // light through the blade: strongest looking toward the sun from the shaded side
+  let back = clamp(-dot(n, L), 0.0, 1.0);
+  let trans = (pow(max(dot(-V, L), 0.0), 4.0) * 1.2 + 0.25) * back;
+  let tc = alb * vec3f(1.15, 1.3, 0.45);
+  let ao = i.col.a;
+  let sv = skyVis(p);
+  let amb = ambientV(bn, sv) * (0.35 + 0.65 * ao) + ambientV(-bn, sv) * tc * 0.6 * ao;
+  let H = normalize(L + V);
+  let gloss = select(0.15, 0.45, ff);
+  let sp = pow(max(dot(n, H), 0.0), 60.0) * gloss * sh * (1.0 - s.tone * 0.4);
+  let f = 0.03 + 0.4 * pow(1.0 - abs(dot(n, V)), 5.0);
+  var c = alb * (SUNC * diff + amb) + tc * SUNC * sh * trans * 0.35 + SUNC * sp * 0.35 + ambientV(reflect(-V, n), sv) * f * 0.3 * ao;
+  c = fogApply(c, p);
+  return vec4f(enc(c).rgb, cov);
+}`;
+
+// ---------------------------------------------------------------- per-frame culling of foliage clusters (compute)
+const W_CULL = /*wgsl*/`
+struct CU { planes: array<vec4f, 6>, cam: vec4f, total: u32, ncat: u32, pad0: u32, pad1: u32, cat: array<vec4f, 8>, rng: array<vec4u, 8> }
+@group(0) @binding(0) var<uniform> c: CU;
+@group(0) @binding(1) var<storage, read> cl: array<vec4f>;
+@group(0) @binding(2) var<storage, read_write> vis: array<u32>;
+@group(0) @binding(3) var<storage, read_write> args: array<atomic<u32>>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let i = gid.x; if (i >= c.total) { return; }
+  var k = 0u; for (var j = 1u; j < c.ncat; j++) { if (i >= c.rng[j].x) { k = j; } }
+  let s = cl[i]; let prm = c.cat[k];
+  let d = distance(s.xyz, c.cam.xyz);
+  if ((d - s.w) * c.cam.w > prm.x) { return; }
+  for (var p = 0u; p < 6u; p++) { if (dot(c.planes[p].xyz, s.xyz) + c.planes[p].w < -s.w) { return; } }
+  let lod = select(1u, 0u, d - s.w < prm.y);
+  // density LOD (same rule as the leaf vertex shader, at the cluster's nearest point): only the survivors are drawn
+  let dn = max(d - s.w, 1.0) * c.cam.w;
+  let f = clamp(pow(prm.z / dn, 1.6), prm.w, 1.0);
+  let n = min(64u, u32(ceil(f * smoothstep(prm.x, prm.x * 0.7, dn) * 64.0)));
+  if (n == 0u) { return; }
+  let idx = atomicAdd(&args[(k * 2u + lod) * 5u + 1u], n);
+  let cid = (i - c.rng[k].x) * 64u;
+  // near list fills its range from the front, far list from the back
+  for (var j = 0u; j < n; j++) { vis[select(c.rng[k].y + idx + j, c.rng[k].y + c.rng[k].z - 1u - idx - j, lod == 1u)] = cid + j; }
+}`;
+
+// ---------------------------------------------------------------- sky (fills pixels no geometry covered)
+const W_SKY = W_COMMON + /*wgsl*/`
+struct VO { @builtin(position) pos: vec4f, @location(0) q: vec2f }
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VO {
+  var o: VO; let q = vec2f(f32((i << 1u) & 2u), f32(i & 2u)) * 2.0 - 1.0;
+  o.pos = vec4f(q, 0.0, 1.0); o.q = q; return o;
+}
+@fragment fn fs(i: VO) -> @location(0) vec4f {
+  let rd = normalize(u.fwd.xyz + u.right.xyz * i.q.x * u.right.w + u.up.xyz * i.q.y * u.up.w);
+  var c = sky(rd);
+  // the boundary haze: far below the horizon is always fog
+  let T = exp(-u.misc.x * 60.0 * exp(-(u.cam.y - u.misc.y) / 22.0) / max(rd.y * 1.6 + 0.08, 0.02));
+  c = c * T + fogCol(rd, 400.0) * (1.0 - T);
+  return enc(c);
+}`;
+
+// ---------------------------------------------------------------- water (streams, pools, falls) in a second pass
+const W_WATER = W_COMMON + /*wgsl*/`
+@group(1) @binding(0) var tCol: texture_2d<f32>;
+@group(1) @binding(1) var tDep: texture_depth_multisampled_2d;
+struct VI { @location(0) p: vec3f, @location(1) f: vec4f }
+struct VO { @builtin(position) pos: vec4f, @location(0) wp: vec3f, @location(1) f: vec4f }
+@vertex fn vs(i: VI) -> VO { var o: VO; o.pos = u.vp * vec4f(i.p, 1.0); o.wp = i.p; o.f = i.f; return o; }
+fn linZ(d: f32) -> f32 { return u.fwd.w / max(d, 1e-7); }
+@fragment fn fs(i: VO) -> @location(0) vec4f {
+  let p = i.wp; let t = u.cam.w;
+  let fall = i.f.z; let flow = select(i.f.xy, vec2f(i.f.x, 0.0), fall > 0.5); let foam0 = i.f.w;
+  let V = normalize(u.cam.xyz - p); let dist = length(u.cam.xyz - p);
+  let pix = vec2i(i.pos.xy);
+  let sceneD = linZ(textureLoad(tDep, pix, 0));
+  let myD = linZ(i.pos.z);
+  let depth = max(sceneD - myD, 0.0) * abs(V.y) + fall * 0.5;
+  // ripples advected along the flow
+  let q = vec3f(p.x, 0.0, p.z);
+  let o1 = vec3f(flow.x, 0.0, flow.y) * t;
+  let r1 = n3(q * 0.09 - o1 * 0.09 + vec3f(0.0, t * 0.01, 0.0)).xyz - 0.5;
+  let r2 = n3(q * 0.31 - o1 * 0.31 * 1.3 + vec3f(0.3, t * 0.03, 0.0)).xyz - 0.5;
+  let fw = clamp(1.0 - fwidth(p.x) * 4.0, 0.0, 1.0);
+  var n = normalize(vec3f(r1.x * 0.8 + r2.x * 0.5 * fw, 1.0, r1.z * 0.8 + r2.z * 0.5 * fw));
+  // rings spreading from where the falls hit the water
+  let fo = p.xz - u.misc2.xz; let fd = length(fo);
+  n = normalize(n + vec3f(fo.x, 0.0, fo.y) / max(fd, 0.1) * sin(fd * 5.0 - t * 7.0) * exp(-fd / 5.0) * 0.6 * fw);
+  n = normalize(mix(n, vec3f(0.0, 1.0, 0.0), 0.2));
+  // refraction
+  let scr = i.pos.xy * u.scr.zw;
+  var ro = scr + n.xz * 0.04 * clamp(depth, 0.0, 1.0) / max(myD * 0.08, 1.0);
+  let rd = linZ(textureLoad(tDep, vec2i(ro * u.scr.xy), 0));
+  if (rd < myD) { ro = scr; }
+  let below = dec(textureSampleLevel(tCol, sClamp, ro, 0.0).rgb);
+  let absorb = exp(-depth * vec3f(2.8, 1.4, 1.6));
+  let deepc = vec3f(0.02, 0.05, 0.04) * (ambient(vec3f(0.0, 1.0, 0.0), p) * 1.5);
+  var c = below * absorb + deepc * (1.0 - absorb);
+  // screen-space reflection, with the canopy / sky as the fallback
+  let R = reflect(-V, n);
+  var refl = mix(vec3f(0.025, 0.045, 0.03) * u.prm.z * 3.0, sky(R) * 0.22, skyVis(p) * smoothstep(0.1, 0.6, R.y));
+  var hit = 0.0;
+  var rp = p; let stp = 0.6 + myD * 0.03;
+  for (var k = 0; k < 20; k++) {
+    rp += R * stp * (1.0 + f32(k) * 0.25);
+    let cp = u.vp * vec4f(rp, 1.0);
+    if (cp.w <= 0.0) { break; }
+    let su = cp.xy / cp.w * vec2f(0.5, -0.5) + 0.5;
+    if (any(su < vec2f(0.0)) || any(su > vec2f(1.0))) { break; }
+    let sz = linZ(textureLoad(tDep, vec2i(su * u.scr.xy), 0));
+    if (sz < cp.w && cp.w - sz < 3.0 + f32(k)) {
+      let e = smoothstep(0.0, 0.12, min(min(su.x, 1.0 - su.x), min(su.y, 1.0 - su.y)));
+      refl = mix(refl, dec(textureSampleLevel(tCol, sClamp, su, 0.0).rgb), e); hit = 1.0; break;
+    }
+  }
+  let F = min(0.02 + 0.98 * pow(1.0 - max(dot(n, V), 0.0), 5.0), 0.55);
+  c = mix(c, refl * vec3f(0.5, 0.62, 0.6), F);
+  // a pale line where the water meets the bank
+  c = mix(c, c * 0.7, smoothstep(0.08, 0.0, depth) * 0.5);
+  // sun glints
+  let L = u.sun.xyz; let sh = shadowAt(p + vec3f(0.0, 0.05, 0.0), 1.0);
+  let H = normalize(L + V);
+  c += SUNC * sh * (pow(max(dot(n, H), 0.0), 900.0) * 2.5 + pow(max(dot(n, H), 0.0), 90.0) * 0.25);
+  // foam on falls and in shallow fast water, white water streaks on the falls
+  let streak = n3(vec3f(p.x * 0.09, p.y * 0.008 + t * 0.06, p.z * 0.09)).x;
+  let fm = clamp(foam0 * smoothstep(0.35, 0.7, n3(q * 0.05 - o1 * 0.05).y + n3(q * 0.2 - o1 * 0.2).z * 0.4) + smoothstep(0.1, 0.0, depth) * 0.15, 0.0, 1.0);
+  let foamc = vec3f(0.8, 0.86, 0.85) * (ambient(vec3f(0.0, 1.0, 0.0), p) * 1.1 + SUNC * sh * 0.12);
+  c = mix(c, foamc, fm * 0.7);
+  let st2 = n3(vec3f(p.x * 0.25, p.y * 0.02 + t * 0.15, p.z * 0.25)).y;
+  c = mix(c, foamc * (0.55 + 0.5 * streak + 0.35 * st2), fall * (0.75 + 0.25 * smoothstep(0.3, 0.7, streak)));
+  var a = 1.0;
+  if (fall > 0.5) { a = clamp((1.0 - abs(flow.x) - (streak - 0.5) * 1.4 - (st2 - 0.5) * 0.6) * 2.5, 0.0, 1.0); }
+  c = fogApply(c, p);
+  return vec4f(enc(c).rgb, a);
+}`;
+
+// ---------------------------------------------------------------- particles and wildlife
+const W_FX = W_COMMON + /*wgsl*/`
+@group(1) @binding(0) var<storage, read> fx: array<vec4f>;
+struct VO { @builtin(position) pos: vec4f, @location(0) q: vec2f, @location(1) c: vec4f, @location(2) wp: vec3f }
+fn quadCorner(i: u32) -> vec2f { return vec2f(f32(i & 1u), f32((i >> 1u) & 1u)) * 2.0 - 1.0; }
+fn billboard(p: vec3f, q: vec2f, r: f32) -> vec4f {
+  // never smaller than ~1.3 px, so motes do not twinkle
+  let w = dot(p - u.cam.xyz, u.fwd.xyz);
+  let rp = max(r, w * u.up.w * 2.6 * u.scr.w);
+  return u.vp * vec4f(p + (u.right.xyz * q.x + u.up.xyz * q.y) * rp, 1.0);
+}
+// pollen / dust: a box of motes that wraps around the camera; only those in a sunbeam really show
+@vertex fn vsMote(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VO {
+  var o: VO; let q = quadCorner(vi); let t = u.cam.w;
+  let B = 36.0;
+  let h = vec3f(hf(ii * 3u), hf(ii * 3u + 1u), hf(ii * 3u + 2u));
+  let drift = vec3f(sin(t * 0.13 + h.x * 30.0) * 0.6 + t * 0.12, sin(t * 0.21 + h.y * 20.0) * 0.4 + t * 0.03, cos(t * 0.17 + h.z * 25.0) * 0.6 + t * 0.08);
+  let p = u.cam.xyz + (fract(h + (drift - u.cam.xyz) / B) - 0.5) * B;
+  let r = 0.006 + 0.01 * hf(ii * 7u);
+  o.pos = billboard(p, q, r);
+  let d = length(p - u.cam.xyz);
+  let sh = shadowAt(p, 1.0);
+  let mu = dot(normalize(p - u.cam.xyz), u.sun.xyz);
+  let bright = sh * (0.25 + 2.5 * pow(max(mu, 0.0), 6.0)) * 2.2 + 0.015;
+  let fade = smoothstep(B * 0.5, B * 0.3, d) * smoothstep(0.3, 1.2, d);
+  let w = dot(p - u.cam.xyz, u.fwd.xyz);
+  let px = r / (w * u.up.w * 2.0 * u.scr.w);
+  o.c = vec4f(vec3f(1.0, 0.9, 0.65) * bright * fade * min(px * px, 1.0) * 0.45, 1.0);
+  o.q = q; o.wp = p;
+  return o;
+}
+@fragment fn fsGlow(i: VO) -> @location(0) vec4f {
+  let a = max(1.0 - dot(i.q, i.q), 0.0);
+  let c = min(i.c.rgb * a * a * fogT(i.wp), vec3f(3.0));
+  return vec4f(c / (1.0 + max(c.r, max(c.g, c.b))) * 0.25, 0.0);
+}
+// fireflies in the shade: wander around their home point, blink
+@vertex fn vsFly(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VO {
+  var o: VO; let q = quadCorner(vi); let t = u.cam.w;
+  let home = fx[2048u + ii];
+  let ph = home.w;
+  let p = home.xyz + vec3f(sin(t * 0.31 + ph * 7.0) * 1.6 + sin(t * 0.9 + ph * 3.0) * 0.4, sin(t * 0.47 + ph * 5.0) * 0.5, cos(t * 0.27 + ph * 11.0) * 1.6);
+  let blink = pow(max(sin(t * (0.8 + fract(ph * 3.7) * 0.9) + ph * 40.0), 0.0), 6.0);
+  let sh = shadowAt(p, 1.0);
+  o.pos = billboard(p, q, 0.06);
+  o.c = vec4f(vec3f(0.75, 1.0, 0.3) * blink * 12.0 * (1.0 - sh * 0.9) * smoothstep(80.0, 30.0, distance(p, u.cam.xyz)), 1.0);
+  o.q = q; o.wp = p;
+  return o;
+}
+// waterfall spray: particles shot out at the foot of each fall
+@vertex fn vsSpray(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VO {
+  var o: VO; let q = quadCorner(vi); let t = u.cam.w;
+  let src = fx[ii % 8u + 64u];
+  let ph = hf(ii * 13u);
+  let life = fract(t * (0.25 + 0.2 * hf(ii * 5u)) + ph);
+  let a = hf(ii * 7u) * 6.283;
+  let sp = 1.0 + 2.5 * hf(ii * 11u);
+  let p = src.xyz + vec3f(cos(a) * sp * life * src.w, life * (3.5 - 4.0 * life) * src.w, sin(a) * sp * life * src.w);
+  let r = (0.3 + life * 1.1) * src.w;
+  o.pos = u.vp * vec4f(p + (u.right.xyz * q.x + u.up.xyz * q.y) * r, 1.0);
+  let sh = shadowAt(p, 1.0);
+  o.c = vec4f((ambient(vec3f(0.0, 1.0, 0.0), p) * 0.6 + SUNC * sh * 0.12) * (1.0 - life) * 0.18 * step(0.01, src.w), 1.0);
+  o.q = q; o.wp = p;
+  return o;
+}
+@fragment fn fsSoft(i: VO) -> @location(0) vec4f {
+  let a = max(1.0 - dot(i.q, i.q), 0.0);
+  let c = i.c.rgb * a * fogT(i.wp);
+  return vec4f(c / (1.0 + max(c.r, max(c.g, c.b))), 0.0);
+}
+// falling leaves: tumble down from the canopy around the camera
+struct LO { @builtin(position) pos: vec4f, @location(0) q: vec2f, @location(1) c: vec3f, @location(2) wp: vec3f, @location(3) n: vec3f }
+@vertex fn vsFall(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> LO {
+  var o: LO; let q = quadCorner(vi); let t = u.cam.w;
+  let B = 70.0;
+  let h = vec3f(hf(ii * 3u + 100u), hf(ii * 3u + 101u), hf(ii * 3u + 102u));
+  let H = 32.0;
+  let fallT = fract(t * (0.022 + 0.012 * h.y) + h.y);
+  var xz = u.cam.xz + (fract(h.xz + (vec2f(t * 0.03, t * 0.02) - u.cam.xz) / B) - 0.5) * B;
+  let gy = mapAt(xz).r;
+  let y = gy + H * (1.0 - fallT) + 0.05;
+  xz += vec2f(sin(t * 1.1 + h.x * 40.0), cos(t * 0.9 + h.z * 40.0)) * 0.6;
+  let p = vec3f(xz.x, y, xz.y);
+  let a = t * (1.5 + h.x * 2.0) + h.z * 30.0; let b = t * (2.1 + h.y) + h.x * 20.0;
+  let ax = vec3f(cos(a), sin(a) * 0.5, sin(a));
+  let ay = normalize(cross(ax, vec3f(sin(b), cos(b), 0.3)));
+  let s = 0.035 + 0.035 * h.z;
+  let wp = p + (ax * q.x * 0.45 + ay * q.y) * s;
+  o.pos = u.vp * vec4f(wp, 1.0);
+  o.q = q; o.wp = wp; o.n = cross(ax, ay);
+  let k = hf(ii * 17u);
+  o.c = srgb(select(select(vec3f(0.55, 0.35, 0.1), vec3f(0.75, 0.6, 0.15), k > 0.5), vec3f(0.35, 0.5, 0.12), k > 0.8)) * smoothstep(80.0, 50.0, distance(p, u.cam.xyz)) ;
+  return o;
+}
+@fragment fn fsFall(i: LO, @builtin(front_facing) ff: bool) -> @location(0) vec4f {
+  let d = (0.95 - abs(i.q.x) / max(pow(1.0 - i.q.y * i.q.y, 0.7), 1e-3)) * 0.5;
+  let cov = clamp(d / max(fwidth(d), 1e-4) + 0.5, 0.0, 1.0);
+  if (cov <= 0.0 || dot(i.c, i.c) < 1e-6) { discard; }
+  var n = normalize(i.n); if (!ff) { n = -n; }
+  let sh = shadowAt(i.wp, 1.0);
+  let V = normalize(u.cam.xyz - i.wp);
+  let c = i.c * (SUNC * sh * (abs(dot(n, u.sun.xyz)) * 0.6 + pow(max(dot(-V, u.sun.xyz), 0.0), 3.0) * 0.6) + ambient(n, i.wp));
+  return vec4f(enc(fogApply(c, i.wp)).rgb, cov);
+}
+// birds, hornbills, butterflies, dragonflies: small procedural meshes animated here
+// fx layout: [0..63] spray sources etc. Birds read their territory from fx[128 + ...]
+struct BI { @location(0) p: vec3f, @location(1) n: vec4f, @location(2) m: vec4f, @location(3) s: vec4f }
+struct BO { @builtin(position) pos: vec4f, @location(0) wp: vec3f, @location(1) n: vec3f, @location(2) @interpolate(flat) c: vec3f, @location(3) @interpolate(flat) e: f32 }
+override CREATURE: u32 = 0;
+override NPER: u32 = 12;
+override FXBASE: u32 = 128;
+fn perch(i: u32) -> vec3f { return fx[FXBASE + i].xyz; }
+fn spline(a: vec3f, b: vec3f, c: vec3f, d: vec3f, t: f32) -> vec3f {
+  return 0.5 * (2.0 * b + (c - a) * t + (2.0 * a - 5.0 * b + 4.0 * c - d) * t * t + (3.0 * b - a - 3.0 * c + d) * t * t * t);
+}
+@vertex fn vsBird(i: BI, @builtin(instance_index) ii: u32) -> BO {
+  var o: BO; let t = u.cam.w;
+  var pos: vec3f; var dir: vec3f; var flap = 0.0; var scale = 1.0; var col = vec3f(0.5);
+  let hb = hf(ii * 31u + CREATURE * 1000u);
+  if (CREATURE == 0u) {
+    // small birds hop between perches in their own territory; the sequence comes from a hash, so it never repeats
+    let T = 4.0 + 3.0 * hb; let tt = t + hb * 50.0; let seg = u32(floor(tt / T)); let f = fract(tt / T);
+    let base = (ii * 7u) % 40u;
+    let pa = perch((base + ih(seg * 9u + ii) % NPER) % 512u);
+    let pb = perch((base + ih((seg + 1u) * 9u + ii) % NPER) % 512u);
+    let fly = smoothstep(0.35, 0.4, f);
+    let ft = clamp((f - 0.4) / 0.6, 0.0, 1.0);
+    let e = ft * ft * (3.0 - 2.0 * ft);
+    pos = mix(pa, pb, e) + vec3f(0.0, sin(ft * PI) * (1.5 + distance(pa, pb) * 0.12), 0.0);
+    dir = normalize(pb - pa + vec3f(0.0, cos(ft * PI) * 3.0, 0.0) + vec3f(1e-3, 0.0, 0.0));
+    flap = select(0.15 * sin(t * 3.0 + hb * 10.0), sin(t * 38.0 + hb * 20.0) * (0.6 + 0.4 * step(0.5, fract(ft * 3.0 + hb))), ft > 0.0 && ft < 1.0);
+    let k = ih(ii) % 5u;
+    var pal = array<vec3f, 5>(vec3f(0.9, 0.12, 0.05), vec3f(0.1, 0.45, 0.85), vec3f(0.95, 0.75, 0.05), vec3f(0.15, 0.6, 0.2), vec3f(0.95, 0.4, 0.05)); col = pal[k];
+    scale = 1.4 + 0.4 * hb;
+  } else if (CREATURE == 1u) {
+    // hornbills: slow, wide, never-repeating loops over the ravine and the big openings, flap then glide
+    let c = fx[FXBASE + ii];
+    let w = 0.045 + 0.02 * hb;
+    pos = c.xyz + vec3f(sin(t * w + hb * 9.0) * c.w + sin(t * w * 2.7 + hb) * c.w * 0.3, sin(t * w * 1.9 + hb * 4.0) * 4.0, cos(t * w * 1.13 + hb * 9.0) * c.w * 0.8);
+    let p2 = c.xyz + vec3f(sin((t + 0.1) * w + hb * 9.0) * c.w + sin((t + 0.1) * w * 2.7 + hb) * c.w * 0.3, sin((t + 0.1) * w * 1.9 + hb * 4.0) * 4.0, cos((t + 0.1) * w * 1.13 + hb * 9.0) * c.w * 0.8);
+    dir = normalize(p2 - pos);
+    let cyc = fract(t * 0.12 + hb);
+    flap = select(0.08, sin(t * 9.0 + hb * 7.0) * 0.9, cyc < 0.45);
+    col = vec3f(0.04, 0.04, 0.04);
+    scale = 2.6;
+  } else if (CREATURE == 2u) {
+    // butterflies: erratic flutter around flowers in sun
+    let c = fx[FXBASE + ii % 64u];
+    let s = t * (0.5 + hb * 0.3) + hb * 30.0;
+    pos = c.xyz + vec3f(sin(s * 1.3) * 2.2 + sin(s * 3.7) * 0.5, 0.8 + sin(s * 2.1) * 0.6 + sin(s * 7.3) * 0.15, cos(s * 1.1) * 2.2 + cos(s * 4.1) * 0.5);
+    let s2 = s + 0.05;
+    let p2 = c.xyz + vec3f(sin(s2 * 1.3) * 2.2 + sin(s2 * 3.7) * 0.5, 0.8 + sin(s2 * 2.1) * 0.6, cos(s2 * 1.1) * 2.2 + cos(s2 * 4.1) * 0.5);
+    dir = normalize(p2 - pos + vec3f(1e-3, 0.0, 0.0));
+    flap = sin(t * 22.0 + hb * 40.0);
+    let k = ih(ii * 3u) % 5u;
+    var pal = array<vec3f, 5>(vec3f(0.05, 0.35, 1.0), vec3f(1.0, 0.45, 0.02), vec3f(1.0, 0.9, 0.15), vec3f(0.95, 0.95, 0.9), vec3f(0.1, 0.8, 0.6)); col = pal[k];
+    scale = 0.8 + 0.4 * hb;
+  } else {
+    // dragonflies: hover then dart over the water
+    let c = fx[FXBASE + ii % 64u];
+    let T = 2.5; let tt = t + hb * 20.0; let seg = floor(tt / T); let f = fract(tt / T);
+    let a = vec3f(hf(u32(seg) * 3u + ii * 101u), hf(u32(seg) * 3u + ii * 101u + 1u), hf(u32(seg) * 3u + ii * 101u + 2u)) - 0.5;
+    let b = vec3f(hf(u32(seg + 1.0) * 3u + ii * 101u), hf(u32(seg + 1.0) * 3u + ii * 101u + 1u), hf(u32(seg + 1.0) * 3u + ii * 101u + 2u)) - 0.5;
+    let e = smoothstep(0.6, 0.85, f);
+    pos = c.xyz + mix(a, b, e) * vec3f(8.0, 1.0, 8.0) + vec3f(0.0, 0.6 + sin(t * 5.0 + hb) * 0.03, 0.0);
+    dir = normalize(vec3f(b.x - a.x, 0.0, b.z - a.z) + vec3f(1e-3, 0.0, 0.0));
+    flap = sin(t * 60.0 + hb * 9.0);
+    col = select(vec3f(0.85, 0.12, 0.05), vec3f(0.1, 0.6, 0.75), hb > 0.5);
+    scale = 1.0;
+  }
+  // never let a creature fill the screen: shrink away within a few metres of the camera
+  scale *= smoothstep(1.5, 5.0, distance(pos, u.cam.xyz));
+  // mesh: x right, y up, z forward; s.x = |wing span coordinate|, m.y = part (0 body, 1 wing, 2 accent)
+  var lp = i.p * scale;
+  let span = i.s.x;
+  if (span > 0.0) {
+    let ang = flap * 0.9 * select(1.0, 1.3, CREATURE == 2u);
+    let sx = sign(lp.x);
+    let r = abs(lp.x);
+    lp = vec3f(sx * r * cos(ang), lp.y + r * sin(ang) * (1.0 + span * 0.4), lp.z);
+  }
+  let fw = dir; let rt = normalize(cross(fw, vec3f(0.0, 1.0, 0.0)) + vec3f(1e-4, 0.0, 0.0)); let up = cross(rt, fw);
+  let wp = pos + rt * lp.x + up * lp.y + fw * lp.z;
+  o.pos = u.vp * vec4f(wp, 1.0);
+  o.wp = wp; o.n = normalize(rt * i.n.x + up * i.n.y + fw * i.n.z);
+  let part = u32(i.m.y * 255.0 + 0.5);
+  var c = col;
+  if (CREATURE == 1u) { c = select(select(vec3f(0.05), vec3f(0.85, 0.85, 0.8), part == 2u), vec3f(0.95, 0.75, 0.15), part == 3u); }
+  else if (part == 2u) { c = vec3f(0.95, 0.9, 0.2); }
+  else if (part == 3u) { c = vec3f(0.08, 0.06, 0.05); }
+  o.c = srgb(c); o.e = 0.0;
+  return o;
+}
+@fragment fn fsBird(i: BO, @builtin(front_facing) ff: bool) -> @location(0) vec4f {
+  var n = normalize(i.n); if (!ff) { n = -n; }
+  let sh = shadowAt(i.wp, 1.0);
+  let c = i.c * (SUNC * sh * (max(dot(n, u.sun.xyz), 0.0) * 0.8 + 0.2) + ambient(n, i.wp) * 1.3);
+  return enc(fogApply(c, i.wp));
+}`;
+
+// ---------------------------------------------------------------- volumetric light shafts and mist (half resolution)
+const W_FOG = W_COMMON + /*wgsl*/`
+@group(1) @binding(0) var tDep: texture_depth_multisampled_2d;
+struct VO { @builtin(position) pos: vec4f, @location(0) q: vec2f }
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VO {
+  var o: VO; let q = vec2f(f32((i << 1u) & 2u), f32(i & 2u)) * 2.0 - 1.0;
+  o.pos = vec4f(q, 0.0, 1.0); o.q = q; return o;
+}
+struct FO { @location(0) c: vec4f, @location(1) d: f32 }
+@fragment fn fs(i: VO) -> FO {
+  let pix = vec2i(i.pos.xy) * 2;
+  // farthest of the 2x2 full-res samples keeps thin leaves from blocking the shafts behind them
+  let dz = textureLoad(tDep, pix + vec2i(i32(u.prm.y) & 1, (i32(u.prm.y) >> 1) & 1) * 0, 0);
+  let rd0 = u.fwd.xyz + u.right.xyz * i.q.x * u.right.w + u.up.xyz * i.q.y * u.up.w;
+  let wz = u.fwd.w / max(dz, 1e-7);
+  let rd = normalize(rd0);
+  let tmax = min(wz * length(rd0), 170.0);
+  let N = 32;
+  let jit = fract(52.9829189 * fract(dot(vec2f(i.pos.xy), vec2f(0.06711056, 0.00583715))));
+  var T = 1.0; var Tm = 1.0; var ins = vec3f(0.0); var amb = vec3f(0.0);
+  let mu = dot(rd, u.sun.xyz);
+  let ph = hg(mu, 0.6) * 0.7 + hg(mu, -0.2) * 0.3 + 0.03;
+  let t = u.cam.w;
+  var prev = 0.0;
+  for (var k = 0; k < N; k++) {
+    let a = (f32(k) + jit) / f32(N);
+    let tt = tmax * a * a;
+    let dt = tt - prev; prev = tt;
+    let p = u.cam.xyz + rd * tt;
+    let m = mapAt(p.xz);
+    // base haze (already in the analytic fog) only scatters sunlight here; ground mist and ravine mist also absorb
+    let base = u.misc.x * exp(-(p.y - u.misc.y) / 22.0);
+    let nz = n3(p * 0.021 + vec3f(t * 0.004, -t * 0.002, t * 0.003));
+    let hg0 = max(p.y - m.r, 0.0);
+    var mist = 0.035 * exp(-hg0 / 2.2) * smoothstep(0.42, 0.7, nz.x + nz.y * 0.3);
+    mist += 0.05 * exp(-max(p.y + 6.0, 0.0) / 5.0) * (0.5 + nz.x);
+    mist += 0.004 * smoothstep(0.45, 0.75, nz.y);
+    let fd = distance(p, u.misc2.xyz);
+    mist += 0.025 * exp(-fd * fd / (u.misc2.w * u.misc2.w)) * (0.6 + 0.8 * nz.z);
+    let sh = shadowAt(p, 1.0);
+    let sun = sh * (base + mist) * u.prm.w;
+    ins += T * sun * dt;
+    let sv = skyVis(p);
+    amb += T * mist * dt * (0.25 + 0.75 * sv);
+    T *= exp(-(base + mist) * dt);
+    Tm *= exp(-mist * dt);
+  }
+  var o: FO;
+  let ambc = (vec3f(0.42, 0.62, 0.78) * 1.1 + vec3f(0.12, 0.2, 0.08)) * 0.6;
+  o.c = vec4f(SUNC * ph * ins + ambc * amb * u.prm.z * 1.6, Tm);
+  o.d = wz;
+  return o;
+}`;
+
+// separable depth-aware blur on the half-res fog
+const W_BLUR = /*wgsl*/`
+@group(0) @binding(0) var tC: texture_2d<f32>;
+@group(0) @binding(1) var tD: texture_2d<f32>;
+override DX: i32 = 1;
+override DY: i32 = 0;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f { let q = vec2f(f32((i << 1u) & 2u), f32(i & 2u)) * 2.0 - 1.0; return vec4f(q, 0.0, 1.0); }
+struct FO { @location(0) c: vec4f, @location(1) d: f32 }
+@fragment fn fs(@builtin(position) pp: vec4f) -> FO {
+  let p = vec2i(pp.xy); let sz = vec2i(textureDimensions(tC));
+  let d0 = textureLoad(tD, p, 0).r;
+  var s = vec4f(0.0); var w = 0.0;
+  for (var k = -4; k <= 4; k++) {
+    let q = clamp(p + vec2i(DX, DY) * k * 2, vec2i(0), sz - 1);
+    let d = textureLoad(tD, q, 0).r;
+    let wk = exp(-f32(k * k) / 10.0) * exp(-abs(d - d0) / (0.06 * d0 + 0.3));
+    s += textureLoad(tC, q, 0) * wk; w += wk;
+  }
+  var o: FO; o.c = s / w; o.d = d0; return o;
+}`;
+
+// bloom: downsample chain and additive upsample
+const W_BLOOM = /*wgsl*/`
+@group(0) @binding(0) var t: texture_2d<f32>;
+@group(0) @binding(1) var s: sampler;
+fn dec(c0: vec3f) -> vec3f { var c = max(c0, vec3f(0.0)); let m0 = max(c.r, max(c.g, c.b)); if (m0 > 0.95) { c *= 0.95 / m0; } let m = max(c.r, max(c.g, c.b)); return c / (1.0 - m); }
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f { let q = vec2f(f32((i << 1u) & 2u), f32(i & 2u)) * 2.0 - 1.0; return vec4f(q, 0.0, 1.0); }
+fn uvOf(pp: vec4f) -> vec2f { return pp.xy / vec2f(textureDimensions(t)) * 0.5; }
+fn tap(uv: vec2f) -> vec3f { return textureSampleLevel(t, s, uv, 0.0).rgb; }
+fn down(uv: vec2f, k: vec2f) -> vec3f {
+  return (tap(uv) * 4.0 + tap(uv + k * vec2f(1.0, 1.0)) + tap(uv + k * vec2f(-1.0, 1.0)) + tap(uv + k * vec2f(1.0, -1.0)) + tap(uv + k * vec2f(-1.0, -1.0))) / 8.0;
+}
+@fragment fn fsDown0(@builtin(position) pp: vec4f) -> @location(0) vec4f {
+  let k = 1.0 / vec2f(textureDimensions(t)); let uv = pp.xy * 2.0 * k;
+  var c = vec3f(0.0);
+  for (var j = 0; j < 4; j++) { let o = vec2f(f32(j & 1), f32(j >> 1)) * 2.0 - 1.0; let x = dec(tap(uv + o * k)); c += x / (1.0 + lum(x) * 0.25); }
+  return vec4f(c * 0.25, 1.0);
+}
+fn lum(c: vec3f) -> f32 { return dot(c, vec3f(0.2126, 0.7152, 0.0722)); }
+@fragment fn fsDown(@builtin(position) pp: vec4f) -> @location(0) vec4f {
+  let k = 1.0 / vec2f(textureDimensions(t)); return vec4f(down(pp.xy * 2.0 * k, k), 1.0);
+}
+@fragment fn fsUp(@builtin(position) pp: vec4f) -> @location(0) vec4f {
+  let k = 1.0 / vec2f(textureDimensions(t)); let uv = pp.xy * k * 0.5;
+  return vec4f(down(uv, k * 0.75) * 0.8, 1.0);
+}`;
+
+// final composite: fog shafts (bilateral upsample), bloom, exposure, tone map, grade, dither
+const W_POST = W_COMMON + /*wgsl*/`
+@group(1) @binding(0) var tCol: texture_2d<f32>;
+@group(1) @binding(1) var tFog: texture_2d<f32>;
+@group(1) @binding(2) var tFogD: texture_2d<f32>;
+@group(1) @binding(3) var tBloom: texture_2d<f32>;
+@group(1) @binding(4) var tDep: texture_depth_multisampled_2d;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f { let q = vec2f(f32((i << 1u) & 2u), f32(i & 2u)) * 2.0 - 1.0; return vec4f(q, 0.0, 1.0); }
+fn tonemap(x: vec3f) -> vec3f {
+  // ACES fitted (Narkowicz) with a softer toe
+  let a = x * (2.51 * x + 0.03); let b = x * (2.43 * x + 0.59) + 0.14;
+  return clamp(a / b, vec3f(0.0), vec3f(1.0));
+}
+@fragment fn fs(@builtin(position) pp: vec4f) -> @location(0) vec4f {
+  let p = vec2i(pp.xy);
+  var c = dec(textureLoad(tCol, p, 0).rgb);
+  // bilateral upsample of the half-res shafts / mist
+  let wz = u.fwd.w / max(textureLoad(tDep, p, 0), 1e-7);
+  let fsz = vec2f(textureDimensions(tFog));
+  let hp = pp.xy * 0.5 - 0.5; let b = vec2i(floor(hp)); let f = fract(hp);
+  var fs = vec4f(0.0); var ws = 0.0; var bestD = 1e9; var best = vec4f(0.0, 0.0, 0.0, 1.0);
+  for (var k = 0; k < 4; k++) {
+    let o = vec2i(k & 1, k >> 1); let q = clamp(b + o, vec2i(0), vec2i(fsz) - 1);
+    let bw = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+    let d = textureLoad(tFogD, q, 0).r;
+    let dd = abs(d - wz) / (0.04 * wz + 0.3);
+    let w = bw * exp(-dd * dd);
+    let v = textureLoad(tFog, q, 0);
+    fs += v * w; ws += w;
+    if (dd < bestD) { bestD = dd; best = v; }
+  }
+  // no neighbour at this depth (a silhouette edge): take the closest-depth sample instead of blending across it
+  fs = select(best, fs / max(ws, 1e-6), ws > 0.05);
+  c = c * fs.a + fs.rgb;
+  let bl = textureSampleLevel(tBloom, sClamp, pp.xy * u.scr.zw, 0.0).rgb;
+  c = mix(c, bl, 0.07);
+  c *= u.sun.w;
+  // grade: cool shadows, warm highlights, a touch more saturation
+  let l = lum(c);
+  c = mix(vec3f(l), c, 1.12);
+  c *= mix(vec3f(0.92, 1.0, 1.04), vec3f(1.06, 1.0, 0.9), smoothstep(0.05, 1.2, l));
+  var o = tonemap(c);
+  // vignette
+  let v = pp.xy * u.scr.zw - 0.5; o *= 1.0 - dot(v, v) * 0.45;
+  o = pow(o, vec3f(1.0 / 2.2));
+  // dither (blue-ish noise) against banding in the fog gradients
+  let dn = fract(52.9829189 * fract(dot(pp.xy, vec2f(0.06711056, 0.00583715))) + u.prm.y * 0.618034);
+  o += (dn - 0.5) / 255.0;
+  return vec4f(o, 1.0);
+}`;
+
+// ============================================================================
+// world layout: terrain, karst, stream, ravine, clearings, set-piece locations
+// ============================================================================
+// Coordinates: metres, y up. The camera starts near START looking north (-z) at a sunlit clearing.
+const SUN = vnorm([-0.46, 0.8, -0.42]); // sun from the north-west, ~53° high
+const START = [5, 0, 30], START_LOOK = [-6, 3.5, -24];
+const CLEAR = { x: -6, z: -26, r: 15 }; // sunlit clearing
+const GAPS = [[-17, -38, 21], [52, 30, 8], [-62, 18, 9], [30, -84, 9], [-48, -98, 8], [70, -40, 10], [-100, 60, 9], [-20, 96, 8], [110, 20, 7], [-140, -40, 9]]; // canopy openings x, z, r
+const SHRINE = { x: 13, z: -33, rot: -1.93 };
+const BANYAN_SHRINE = [23, -35.5];
+// karst limestone: capsule ax, az, bx, bz, radius, top height, seed
+const KARST = [
+  [62, 150, 128, 88, 15, 64, 1], // the waterfall ridge (south-east), north-west face lit
+  [-20, -205, 10, -192, 24, 78, 2], [88, -208, 110, -196, 20, 70, 3], [-150, -212, -160, -200, 19, 62, 4],
+  [-162, -40, -150, -12, 22, 70, 5], [-140, 84, -132, 96, 17, 56, 6], [160, -44, 168, -30, 22, 72, 7], [172, 62, 166, 70, 18, 62, 8],
+  [-60, 42, -60, 42, 7, 27, 9], [44, -64, 44, -64, 6, 21, 10], [-108, -88, -82, -56, 6.5, 31, 11], [130, 150, 150, 160, 16, 60, 12],
+  [-190, 150, -170, 170, 22, 70, 13], [200, -150, 185, -170, 20, 66, 14], [-60, 205, -30, 210, 20, 64, 15], [60, 205, 80, 200, 20, 66, 16],
+];
+// carved holes (capsules): ax, ay, az, bx, by, bz, radius — an arch through the small fin, a cave under the ridge
+const CARVE = [[-107, 6.5, -60, -82, 6.5, -84, 5.4], [108, 5, 96, 116, 6, 104, 6.5], [-160, 6, -20, -150, 6, -30, 6]];
+// the stream: control points x, z (levels are derived from the terrain, always falling downstream)
+const STREAM_P = [[72, 108], [60, 98], [46, 88], [34, 74], [22, 62], [14, 48], [12, 34], [8, 18], [2, 2], [-6, -12], [-12, -24], [-10, -38], [-6, -52], [-10, -66], [-6, -82], [2, -96], [8, -110], [10, -122]];
+const POOLS = [[72, 108, 8.5], [-11, -25, 6.5], [14, 47, 4], [-8, -66, 4.5]]; // x, z, radius: wider water
+const RAVINE_P = [[-262, -150], [-200, -142], [-130, -134], [-60, -144], [0, -140], [60, -150], [120, -146], [180, -156], [262, -150]];
+const RAV_FLOOR = -27, RAV_HW = 6.5, RAV_RIM = 15;
+const BRIDGE = { x: -58, z0: -126.5, z1: -160 };
+const FALL_MAIN = { x: 77.5, z: 111.5 }; // lip of the waterfall on the ridge face
+
+// ---------------------------------------------------------------- polylines
+function resample(P, step) {
+  const out = [];
+  for (let i = 0; i < P.length - 1; i++) {
+    const a = P[i], b = P[i + 1], n = max(1, ceil(hypot(b[0] - a[0], b[1] - a[1]) / step));
+    for (let k = 0; k < n; k++) {
+      const t = k / n, a0 = P[max(i - 1, 0)], b1 = P[min(i + 2, P.length - 1)];
+      // Catmull-Rom
+      const cr = (p0, p1, p2, p3) => 0.5 * (2 * p1 + (p2 - p0) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t + (3 * p1 - p0 - 3 * p2 + p3) * t * t * t);
+      out.push([cr(a0[0], a[0], b[0], b1[0]), cr(a0[1], a[1], b[1], b1[1])]);
+    }
+  }
+  out.push(P[P.length - 1].slice());
+  return out;
+}
+// nearest point on a polyline: returns [dist, segment index, t]
+function nearPoly(L, x, z) {
+  let best = 1e9, bi = 0, bt = 0;
+  for (let i = 0; i < L.length - 1; i++) {
+    const ax = L[i][0], az = L[i][1], dx = L[i + 1][0] - ax, dz = L[i + 1][1] - az, l2 = dx * dx + dz * dz;
+    let t = ((x - ax) * dx + (z - az) * dz) / l2; t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const ex = ax + dx * t - x, ez = az + dz * t - z, d = ex * ex + ez * ez;
+    if (d < best) { best = d; bi = i; bt = t; }
+  }
+  return [sqrt(best), bi, bt];
+}
+const STREAM = resample(STREAM_P, 2), RAVINE = resample(RAVINE_P, 4);
+const capsule2 = (x, z, ax, az, bx, bz) => { const dx = bx - ax, dz = bz - az, l2 = dx * dx + dz * dz || 1; let t = ((x - ax) * dx + (z - az) * dz) / l2; t = clamp(t, 0, 1); return hypot(ax + dx * t - x, az + dz * t - z); };
+const karstDist = (x, z) => { let d = 1e9, k = -1; for (let i = 0; i < KARST.length; i++) { const c = KARST[i], e = capsule2(x, z, c[0], c[1], c[2], c[3]) - c[4]; if (e < d) { d = e; k = i; } } return [d, k]; };
+
+// ---------------------------------------------------------------- base ground (JS, 1 m grid)
+const GN = WH * 2 + 1; // samples per side
+const G0 = new Float32Array(GN * GN); // natural ground before the water carves it
+const GH = new Float32Array(GN * GN); // final ground the density volume uses
+const SINFO = new Float32Array(GN * GN * 4); // per cell: stream distance, water level, half width, ravine distance
+function natural(x, z) {
+  let h = 4 + 7 * fbm2(x / 130 + 3.1, z / 130 - 1.7, 4) + 3.2 * fbm2(x / 42 + 7, z / 42 - 3, 3) + 0.7 * fbm2(x / 11, z / 11, 2);
+  // steeper jungle slopes: ridged noise
+  const r = 1 - abs(fbm2(x / 70 - 9, z / 70 + 4, 3)); h += 9 * r * r * sstep(40, 120, hypot(x - CLEAR.x, z - CLEAR.z));
+  const rb = max(abs(x), abs(z)) + fbm2(x / 50, z / 50, 2) * 18;
+  h += 80 * sstep(190, 252, rb) * (0.75 + 0.25 * fbm2(x / 30, z / 30, 3));
+  // talus mounds around karst
+  const [kd] = karstDist(x, z); h += 6 * sstep(26, 0, kd);
+  return h;
+}
+let SLEV; // stream water level per resampled point
+function buildGround() {
+  for (let j = 0; j < GN; j++) for (let i = 0; i < GN; i++) G0[i + j * GN] = natural(i - WH, j - WH);
+  const g0 = (x, z) => { const i = clamp(round(x + WH), 0, GN - 1), j = clamp(round(z + WH), 0, GN - 1); return G0[i + j * GN]; };
+  // clearing: flattened
+  // stream levels: follow the ground but never rise downstream; a few explicit cascades
+  SLEV = new Float32Array(STREAM.length);
+  let lv = 1e9;
+  for (let i = 0; i < STREAM.length; i++) {
+    const [x, z] = STREAM[i];
+    let m = 1e9; for (let a = 0; a < 6; a++) m = min(m, g0(x + cos(a) * 3, z + sin(a) * 3));
+    lv = min(lv - 0.03, m - 0.9);
+    SLEV[i] = lv;
+  }
+  // smooth the levels a little but keep steps (cascades) crisp where the drop is > 0.6 m over 2 m
+  for (let it = 0; it < 3; it++) for (let i = 1; i < STREAM.length - 1; i++) { if (SLEV[i - 1] - SLEV[i + 1] < 1.2) SLEV[i] = (SLEV[i - 1] + SLEV[i] * 2 + SLEV[i + 1]) / 4; }
+  for (let i = 1; i < STREAM.length; i++) SLEV[i] = min(SLEV[i], SLEV[i - 1]);
+  // pools hold one level across their whole basin; the stream drops out of them in a cascade
+  for (const [px, pz, pr] of POOLS) {
+    const [, si] = nearPoly(STREAM, px, pz), pl = SLEV[si];
+    for (let i = 0; i < STREAM.length; i++) if (hypot(STREAM[i][0] - px, STREAM[i][1] - pz) < pr + 2.5) SLEV[i] = pl;
+  }
+  for (let i = 1; i < STREAM.length; i++) SLEV[i] = min(SLEV[i], SLEV[i - 1]);
+  const clearLv = (() => { const [, si] = nearPoly(STREAM, CLEAR.x, CLEAR.z); return SLEV[si] + 0.7; })();
+  for (let j = 0; j < GN; j++) for (let i = 0; i < GN; i++) {
+    const x = i - WH, z = j - WH, k = i + j * GN;
+    let h = G0[k];
+    // clearing
+    const dc = hypot(x - CLEAR.x, z - CLEAR.z); h = mix(clearLv + 0.25 * fbm2(x / 6, z / 6, 2), h, sstep(CLEAR.r * 0.7, CLEAR.r + 16, dc));
+    // stream valley
+    const [ds, si, st] = nearPoly(STREAM, x, z);
+    const lev = mix(SLEV[si], SLEV[min(si + 1, STREAM.length - 1)], st);
+    let hw = 1.6 + 0.9 * (0.5 + 0.5 * vn2(si * 0.13, 3.3));
+    for (const p of POOLS) { const dp = hypot(x - p[0], z - p[1]); hw = max(hw, p[2] * sstep(p[2] * 1.6, p[2] * 0.4, dp) + hw * 0.0); }
+    let pd = 0; for (const p of POOLS) pd = max(pd, sstep(p[2], p[2] * 0.25, hypot(x - p[0], z - p[1])));
+    const bed = lev - 0.25 - 0.9 * sstep(hw, 0, ds) - 1.8 * pd; // channel, deeper in the pools
+    const bank = lev + 0.35 + 0.18 * (ds - hw) + 0.35 * vn2(x * 0.4, z * 0.4);
+    const tgt = ds < hw ? bed : max(bank, bed);
+    h = mix(tgt, h, sstep(hw + 0.5, hw + 16, ds)) ;
+    if (ds < hw + 1) h = min(h, ds < hw ? bed : lev + 0.3 * (ds - hw) + 0.05);
+    // ravine
+    const [dr] = nearPoly(RAVINE, x, z);
+    const rr = RAV_RIM + 3 * vn2(x / 25, z / 25), fw = RAV_HW + 1.5 * vn2(x / 30 + 5, z / 30);
+    if (dr < rr + 6) {
+      const fl = RAV_FLOOR + 1.5 * vn2(x / 40, z / 40) - 0.4 * sstep(fw, 0, dr);
+      const w = sstep(fw, rr, dr); const prof = pow(w, 0.35); // steep walls
+      h = mix(fl, h, prof) + 0 * w;
+      if (dr > rr) h = max(h, mix(h, G0[k], sstep(rr, rr + 6, dr)));
+    }
+    GH[k] = h;
+    SINFO[k * 4] = ds; SINFO[k * 4 + 1] = lev; SINFO[k * 4 + 2] = hw; SINFO[k * 4 + 3] = dr;
+  }
+}
+const gAt = (A, x, z) => { // bilinear sample of a 1 m grid
+  const fx = clamp(x + WH, 0, GN - 1.001), fz = clamp(z + WH, 0, GN - 1.001), i = floor(fx), j = floor(fz), u = fx - i, v = fz - j, k = i + j * GN;
+  return mix(mix(A[k], A[k + 1], u), mix(A[k + GN], A[k + GN + 1], u), v);
+};
+const sInfo = (x, z, c) => SINFO[(clamp(round(x + WH), 0, GN - 1) + clamp(round(z + WH), 0, GN - 1) * GN) * 4 + c];
+
+// ---------------------------------------------------------------- density volume (GPU)
+const VS = 1.25, NX = 416, NY = 112, NZ = 416, OX = -WH, OY = -44, OZ = -WH;
+const W_DENS = /*wgsl*/`
+struct P { n: vec4u }
+@group(0) @binding(0) var<storage, read> gh: array<f32>;
+@group(0) @binding(1) var<storage, read_write> outD: array<f32>;
+@group(0) @binding(2) var<storage, read> karst: array<vec4f>;
+@group(0) @binding(3) var<storage, read> carve: array<vec4f>;
+fn hh(p: vec3i) -> f32 { var x = u32(p.x * 73856093) ^ u32(p.y * 19349663) ^ u32(p.z * 83492791); x = (x ^ (x >> 16u)) * 0x7feb352du; x = (x ^ (x >> 15u)) * 0x846ca68bu; x = x ^ (x >> 16u); return f32(x) / 4294967295.0; }
+fn vn(p: vec3f) -> f32 {
+  let i = vec3i(floor(p)); let f = fract(p); let u = f * f * (3.0 - 2.0 * f);
+  let a = mix(mix(hh(i), hh(i + vec3i(1, 0, 0)), u.x), mix(hh(i + vec3i(0, 1, 0)), hh(i + vec3i(1, 1, 0)), u.x), u.y);
+  let b = mix(mix(hh(i + vec3i(0, 0, 1)), hh(i + vec3i(1, 0, 1)), u.x), mix(hh(i + vec3i(0, 1, 1)), hh(i + vec3i(1, 1, 1)), u.x), u.y);
+  return mix(a, b, u.z) * 2.0 - 1.0;
+}
+fn fbm(p: vec3f) -> f32 { var s = 0.0; var a = 0.5; var q = p; for (var i = 0; i < 4; i++) { s += a * vn(q); q = q * 2.03 + vec3f(5.1, 1.3, 7.7); a *= 0.5; } return s; }
+fn ghAt(x: f32, z: f32) -> f32 {
+  let fx = clamp(x + ${WH}.0, 0.0, ${GN - 1}.0 - 0.001); let fz = clamp(z + ${WH}.0, 0.0, ${GN - 1}.0 - 0.001);
+  let i = u32(fx); let j = u32(fz); let u = fx - f32(i); let v = fz - f32(j); let k = i + j * ${GN}u;
+  return mix(mix(gh[k], gh[k + 1u], u), mix(gh[k + ${GN}u], gh[k + ${GN + 1}u], u), v);
+}
+@compute @workgroup_size(4, 4, 4) fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= ${NX}u || id.y >= ${NY}u || id.z >= ${NZ}u) { return; }
+  let p = vec3f(${OX}.0, ${OY}.0, ${OZ}.0) + vec3f(id) * ${VS};
+  let g = ghAt(p.x, p.z);
+  // slope of the ground: steep ground (valley sides, ravine walls) becomes craggy rock with overhangs
+  let gx = ghAt(p.x + 1.5, p.z) - ghAt(p.x - 1.5, p.z); let gz = ghAt(p.x, p.z + 1.5) - ghAt(p.x, p.z - 1.5);
+  let sl = clamp(length(vec2f(gx, gz)) / 3.0, 0.0, 3.0);
+  var d = g - p.y;
+  let rock = smoothstep(0.7, 1.6, sl);
+  d += rock * (fbm(p * vec3f(0.11, 0.07, 0.11)) * 5.5 + vn(p * 0.35) * 1.1);
+  d += (1.0 - rock) * vn(p * 0.21 + 3.0) * 0.35;
+  // karst towers and ridges: vertical, fluted, rounded tops
+  for (var i = 0u; i < ${KARST.length}u; i++) {
+    let a = karst[i * 2u]; let b = karst[i * 2u + 1u];
+    let ab = a.zw - a.xy; let t = clamp(dot(p.xz - a.xy, ab) / max(dot(ab, ab), 1e-4), 0.0, 1.0);
+    let dist = length(p.xz - (a.xy + ab * t));
+    if (dist > b.x * 1.8 + 12.0) { continue; }
+    let s = b.z * 17.0;
+    let hy = clamp(p.y / b.y, 0.0, 1.2);
+    var r = b.x * (1.0 + 0.22 * (1.0 - hy) * (1.0 - hy) - 0.08 * hy);
+    let fl = fbm(vec3f(p.x * 0.09, p.y * 0.022, p.z * 0.09) + s);   // vertical flutes
+    let rid = 1.0 - abs(vn(vec3f(p.x * 0.25, p.y * 0.035, p.z * 0.25) + s));
+    r += b.x * 0.3 * fl + 2.0 * vn(p * 0.18 + s) + 0.9 * vn(p * 0.5 + s) - 2.2 * rid * rid;
+    // horizontal bands and ledges
+    r += 1.6 * sin(p.y * 0.21 + fl * 3.0) * smoothstep(0.3, 0.8, vn(p * vec3f(0.04, 0.0, 0.04) + s) * 0.5 + 0.5);
+    let top = b.y + 9.0 * fbm(p * 0.03 + s + 11.0) + 4.0 * vn(p * 0.12 + s);
+    let dome = top - p.y - max(dist - r * 0.6, 0.0) * 0.6;
+    let kd = min(r - dist, dome);
+    d = max(d, kd);
+  }
+  for (var i = 0u; i < ${CARVE.length}u; i++) {
+    let a = carve[i * 2u].xyz; let b = carve[i * 2u + 1u];
+    let ab = b.xyz - a; let t = clamp(dot(p - a, ab) / dot(ab, ab), 0.0, 1.0);
+    let q = p - (a + ab * t);
+    let cd = length(q * vec3f(1.0, 1.25, 1.0)) - b.w * (1.0 + 0.25 * vn(p * 0.3));
+    d = min(d, cd);
+  }
+  outD[id.x + ${NX}u * (id.y + ${NY}u * id.z)] = clamp(d, -8.0, 8.0);
+}`;
+const karstBuf = () => { const a = new Float32Array(KARST.length * 8); KARST.forEach((k, i) => a.set([k[0], k[1], k[2], k[3], k[4], k[5], k[6], 0], i * 8)); return a; };
+const carveBuf = () => { const a = new Float32Array(CARVE.length * 8); CARVE.forEach((c, i) => a.set([c[0], c[1], c[2], 0, c[3], c[4], c[5], c[6]], i * 8)); return a; };
+
+// ---------------------------------------------------------------- surface nets
+// D: density (> 0 solid), returns { pos, nrm, quads (vertex indices) }, plus the top-surface height map
+function surfaceNets(D) {
+  const SX = NX, SXY = NX * NY;
+  const vid = new Int32Array(NX * NY * NZ).fill(-1);
+  const P = new Grow(Float32Array, 1 << 22), Nn = new Grow(Float32Array, 1 << 22);
+  const E = [[0, 1], [2, 3], [4, 5], [6, 7], [0, 2], [1, 3], [4, 6], [5, 7], [0, 4], [1, 5], [2, 6], [3, 7]];
+  const CO = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]];
+  const v = new Float32Array(8);
+  let nv = 0;
+  for (let z = 0; z < NZ - 1; z++) for (let y = 0; y < NY - 1; y++) for (let x = 0; x < NX - 1; x++) {
+    const i0 = x + SX * y + SXY * z;
+    let mask = 0;
+    for (let c = 0; c < 8; c++) { const q = D[i0 + CO[c][0] + SX * CO[c][1] + SXY * CO[c][2]]; v[c] = q; if (q > 0) mask |= 1 << c; }
+    if (mask === 0 || mask === 255) continue;
+    let sx = 0, sy = 0, sz = 0, n = 0;
+    for (const [a, b] of E) {
+      if ((v[a] > 0) === (v[b] > 0)) continue;
+      const t = v[a] / (v[a] - v[b]);
+      sx += CO[a][0] + (CO[b][0] - CO[a][0]) * t; sy += CO[a][1] + (CO[b][1] - CO[a][1]) * t; sz += CO[a][2] + (CO[b][2] - CO[a][2]) * t; n++;
+    }
+    sx /= n; sy /= n; sz /= n;
+    // gradient by trilinear derivative of the cell
+    const gx = (v[1] - v[0]) * (1 - sy) * (1 - sz) + (v[3] - v[2]) * sy * (1 - sz) + (v[5] - v[4]) * (1 - sy) * sz + (v[7] - v[6]) * sy * sz;
+    const gy = (v[2] - v[0]) * (1 - sx) * (1 - sz) + (v[3] - v[1]) * sx * (1 - sz) + (v[6] - v[4]) * (1 - sx) * sz + (v[7] - v[5]) * sx * sz;
+    const gz = (v[4] - v[0]) * (1 - sx) * (1 - sy) + (v[5] - v[1]) * sx * (1 - sy) + (v[6] - v[2]) * (1 - sx) * sy + (v[7] - v[3]) * sx * sy;
+    const gl = -1 / (hypot(gx, gy, gz) || 1);
+    P.need(3); P.a[P.n++] = OX + (x + sx) * VS; P.a[P.n++] = OY + (y + sy) * VS; P.a[P.n++] = OZ + (z + sz) * VS;
+    Nn.need(3); Nn.a[Nn.n++] = gx * gl; Nn.a[Nn.n++] = gy * gl; Nn.a[Nn.n++] = gz * gl;
+    vid[i0] = nv++;
+  }
+  // smooth normals with the larger-scale gradient (central differences over the volume)
+  const at = (x, y, z) => D[clamp(x, 0, NX - 1) + SX * clamp(y, 0, NY - 1) + SXY * clamp(z, 0, NZ - 1)];
+  for (let i = 0; i < nv; i++) {
+    const fx = (P.a[i * 3] - OX) / VS, fy = (P.a[i * 3 + 1] - OY) / VS, fz = (P.a[i * 3 + 2] - OZ) / VS, x = round(fx), y = round(fy), z = round(fz);
+    const gx = at(x + 1, y, z) - at(x - 1, y, z), gy = at(x, y + 1, z) - at(x, y - 1, z), gz = at(x, y, z + 1) - at(x, y, z - 1);
+    const l = -1 / (hypot(gx, gy, gz) || 1);
+    let nx = Nn.a[i * 3] + gx * l, ny = Nn.a[i * 3 + 1] + gy * l, nz = Nn.a[i * 3 + 2] + gz * l; const m = 1 / (hypot(nx, ny, nz) || 1);
+    Nn.a[i * 3] = nx * m; Nn.a[i * 3 + 1] = ny * m; Nn.a[i * 3 + 2] = nz * m;
+  }
+  // quads: for each edge crossing along an axis, connect the 4 cells sharing that edge
+  const Q = new Grow(Uint32Array, 1 << 22);
+  for (let z = 1; z < NZ - 1; z++) for (let y = 1; y < NY - 1; y++) for (let x = 1; x < NX - 1; x++) {
+    const i0 = x + SX * y + SXY * z, s0 = D[i0] > 0;
+    // edge to +x: cells (x, y-1..y, z-1..z)
+    if ((D[i0 + 1] > 0) !== s0) { const a = vid[i0 - SX - SXY], b = vid[i0 - SXY], c = vid[i0], d = vid[i0 - SX]; if (a >= 0 && b >= 0 && c >= 0 && d >= 0) { Q.need(4); if (s0) Q.a.set([a, b, c, d], Q.n); else Q.a.set([a, d, c, b], Q.n); Q.n += 4; } }
+    if ((D[i0 + SX] > 0) !== s0) { const a = vid[i0 - 1 - SXY], b = vid[i0 - 1], c = vid[i0], d = vid[i0 - SXY]; if (a >= 0 && b >= 0 && c >= 0 && d >= 0) { Q.need(4); if (s0) Q.a.set([a, b, c, d], Q.n); else Q.a.set([a, d, c, b], Q.n); Q.n += 4; } }
+    if ((D[i0 + SXY] > 0) !== s0) { const a = vid[i0 - 1 - SX], b = vid[i0 - SX], c = vid[i0], d = vid[i0 - 1]; if (a >= 0 && b >= 0 && c >= 0 && d >= 0) { Q.need(4); if (s0) Q.a.set([a, b, c, d], Q.n); else Q.a.set([a, d, c, b], Q.n); Q.n += 4; } }
+  }
+  // top surface height map (1 m grid): highest solid -> air transition per column
+  const TOP = new Float32Array(GN * GN);
+  for (let j = 0; j < GN; j++) for (let i = 0; i < GN; i++) {
+    const fx = clamp(i / VS, 0, NX - 1.001), fz = clamp(j / VS, 0, NZ - 1.001), x0 = floor(fx), z0 = floor(fz), u = fx - x0, w = fz - z0;
+    const col = (y) => { const k = x0 + SX * y + SXY * z0; return mix(mix(D[k], D[k + 1], u), mix(D[k + SXY], D[k + SXY + 1], u), w); };
+    let h = OY;
+    for (let y = NY - 2; y >= 0; y--) { const a = col(y), b = col(y + 1); if (a > 0 && b <= 0) { h = OY + (y + a / (a - b)) * VS; break; } }
+    TOP[i + j * GN] = h;
+  }
+  return { P: P.view(), N: Nn.view(), Q: Q.view(), nv, TOP };
+}
+
+// ============================================================================
+// content: trees, plants, rocks, set pieces, water, creatures, world map
+// ============================================================================
+// ---------------------------------------------------------------- foliage instances
+// 32 B: f32 x,y,z,size | snorm fwd.xyz,droop | snorm faceN.xyz,ao | snorm bend.xyz,sway | rgb565 var:4 phase:6 aspect:6
+const NKIND = 5;
+const KINDS = []; // per kind: { u: Grow(Uint32Array) }
+const _cv = new Float32Array(1), _cu = new Uint32Array(_cv.buffer);
+const fbits = (f) => { _cv[0] = f; return _cu[0]; };
+const p4s = (a, b, c, d) => (sn8(a) | (sn8(b) << 8) | (sn8(c) << 16) | (sn8(d) << 24)) >>> 0;
+for (let k = 0; k < NKIND; k++) KINDS.push(new Grow(Uint32Array, 1 << 20));
+function leaf(kind, p, size, fwd, nf, bend, ao, sw, droop, rgb, variant = 0, phase = 0, aspect = 0.5) {
+  const g = KINDS[kind]; g.need(8); const a = g.a, o = g.n;
+  a[o] = fbits(p[0]); a[o + 1] = fbits(p[1]); a[o + 2] = fbits(p[2]); a[o + 3] = fbits(size);
+  a[o + 4] = p4s(fwd[0], fwd[1], fwd[2], droop);
+  a[o + 5] = p4s(nf[0], nf[1], nf[2], ao * 2 - 1);
+  a[o + 6] = p4s(bend[0], bend[1], bend[2], clamp(sw, 0, 1) * 2 - 1);
+  const r = clamp(round(rgb[0] * 31), 0, 31), gg = clamp(round(rgb[1] * 63), 0, 63), b = clamp(round(rgb[2] * 31), 0, 31);
+  a[o + 7] = ((r << 11) | (gg << 5) | b | ((variant & 15) << 16) | ((round((phase % 1) * 63) & 63) << 20) | ((round(clamp(aspect, 0, 1) * 63) & 63) << 26)) >>> 0;
+  g.n += 8;
+}
+// sort each kind into 3D bins and cut the bins into clusters of 64 (shuffled, padded with zero-size leaves)
+function buildClusters() {
+  const out = [];
+  for (let k = 0; k < NKIND; k++) {
+    const g = KINDS[k], n = g.n / 8, A = g.a, F = new Float32Array(A.buffer, 0, g.n);
+    const B = [6, 4, 6, 3, 5][k];
+    const map = new Map();
+    for (let i = 0; i < n; i++) {
+      const key = floor((F[i * 8] + 300) / B) + floor((F[i * 8 + 1] + 100) / B) * 1000 + floor((F[i * 8 + 2] + 300) / B) * 1000000;
+      let l = map.get(key); if (!l) map.set(key, (l = [])); l.push(i);
+    }
+    const keys = [...map.keys()].sort((a, b) => a - b);
+    let nc = 0; for (const key of keys) nc += ceil(map.get(key).length / 64);
+    const U = new Uint32Array(nc * 64 * 8), UF = new Float32Array(U.buffer), C = new Float32Array(nc * 4);
+    const rr = RNG(77 + k); let c = 0;
+    for (const key of keys) {
+      const l = map.get(key);
+      for (let i = l.length - 1; i > 0; i--) { const j = floor(rr() * (i + 1)); const t = l[i]; l[i] = l[j]; l[j] = t; }
+      for (let s = 0; s < l.length; s += 64, c++) {
+        let mnx = 1e9, mny = 1e9, mnz = 1e9, mxx = -1e9, mxy = -1e9, mxz = -1e9, ms = 0;
+        for (let j = 0; j < 64; j++) {
+          const o = (c * 64 + j) * 8;
+          if (s + j < l.length) {
+            const src = l[s + j] * 8; for (let w = 0; w < 8; w++) U[o + w] = A[src + w];
+            const x = UF[o], y = UF[o + 1], z = UF[o + 2], sz = UF[o + 3];
+            mnx = min(mnx, x); mny = min(mny, y); mnz = min(mnz, z); mxx = max(mxx, x); mxy = max(mxy, y); mxz = max(mxz, z); ms = max(ms, sz);
+          } else { U.set(U.subarray((c * 64) * 8, (c * 64) * 8 + 8), o); UF[o + 3] = 0; }
+        }
+        C[c * 4] = (mnx + mxx) / 2; C[c * 4 + 1] = (mny + mxy) / 2; C[c * 4 + 2] = (mnz + mxz) / 2;
+        C[c * 4 + 3] = hypot(mxx - mnx, mxy - mny, mxz - mnz) / 2 + ms * 1.4 + 0.5;
+      }
+    }
+    out.push({ inst: U, cl: C, n: nc });
+    KINDS[k] = null;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- helpers
+let TOP; // top-surface height map (1 m grid) from the density volume
+const gy = (x, z) => gAt(TOP, x, z);
+const gnorm = (x, z) => vnorm([gy(x - 1, z) - gy(x + 1, z), 2, gy(x, z - 1) - gy(x, z + 1)]);
+const slope = (x, z) => 1 - gnorm(x, z)[1];
+const waterDist = (x, z) => sInfo(x, z, 0) - sInfo(x, z, 2);
+const randDir = (r) => { const z = r() * 2 - 1, a = r() * TAU, s = sqrt(1 - z * z); return [s * cos(a), z, s * sin(a)]; };
+const jit = (c, r, k) => [clamp(c[0] + (r() - 0.5) * k, 0, 1), clamp(c[1] + (r() - 0.5) * k, 0, 1), clamp(c[2] + (r() - 0.5) * k * 0.6, 0, 1)];
+const PAL = [[0.10, 0.27, 0.07], [0.17, 0.33, 0.07], [0.27, 0.40, 0.09], [0.21, 0.29, 0.09], [0.09, 0.25, 0.15], [0.13, 0.30, 0.10], [0.30, 0.42, 0.12], [0.07, 0.20, 0.07]];
+const FLUSH = [[0.48, 0.20, 0.08], [0.55, 0.17, 0.13], [0.45, 0.52, 0.12], [0.62, 0.42, 0.12]];
+const CLUMPS = []; // canopy clumps: x, y, z, r (for the canopy map, perches and the flight path)
+const TREES = []; // trunk positions: x, z, radius, height (collision of placement)
+const PERCH = [];
+const FLY_CLEAR = []; // points the camera path passes, kept free of trunks
+const nearFly = (x, z, r) => { for (const p of FLY_CLEAR) if (hypot(p[0] - x, p[2] - z) < r) return true; return false; };
+
+// a tapered branch: points P with radii from r0 to r1; returns tip
+function limb(geo, P, r0, r1, sides, tree, mat = tree.mat) {
+  geo.setMat(mat, tree.tint, tree.moss, 0);
+  geo.tube(P, P.map((_, i) => mix(r0, r1, i / (P.length - 1))), sides, {
+    sway: (i, p) => geo.setSway(tree.sw(p[1]), tree.ph, 0.15 * (i / P.length), 0),
+    ao: (i, th, r) => 1, cap: true,
+  });
+}
+// curved path from a, direction d, length L, n points, bending toward `pull`
+function curve(a, d, L, n, pull, rr, wob = 0.15) {
+  const P = [a]; let p = a, dir = vnorm(d);
+  for (let i = 1; i < n; i++) {
+    dir = vnorm(vadd(dir, vadd(vmul(pull, 1 / n), [rr.n() * wob, rr.n() * wob * 0.5, rr.n() * wob])));
+    p = vadd(p, vmul(dir, L / (n - 1))); P.push(p);
+  }
+  return P;
+}
+// a clump of canopy leaf-sprays around c
+function crownClump(c, rc, tree, rr, o = {}) {
+  const n = round(rc * rc * (o.dens ?? 13) * 1.15);
+  const flat = o.flat ?? 0.62, size = (o.size ?? 1.15) * 1.3, kind = o.kind ?? 0;
+  CLUMPS.push([c[0], c[1], c[2], rc]);
+  for (let i = 0; i < n; i++) {
+    const d = randDir(rr); d[1] = d[1] * 0.85 + 0.15;
+    const sh = 0.5 + 0.5 * Math.cbrt(rr());
+    const p = [c[0] + d[0] * rc * sh, c[1] + d[1] * rc * sh * flat, c[2] + d[2] * rc * sh];
+    const dn = vnorm([d[0], d[1] * flat + 0.1, d[2]]);
+    let nf = vnorm(vadd(vadd([0, 1.1, 0], vmul(dn, 0.9)), [rr.n() * 0.7, rr.n() * 0.4, rr.n() * 0.7]));
+    let fw = vsub(dn, vmul(nf, vdot(dn, nf))); if (vlen(fw) < 0.1) fw = anyPerp(nf); fw = vnorm(vadd(vnorm(fw), [rr.n() * 0.5, -0.1, rr.n() * 0.5]));
+    const ao = clamp(0.25 + 0.55 * sh * sh + 0.25 * (d[1] * 0.5 + 0.5), 0, 1);
+    const top = d[1] > 0.4 && sh > 0.85;
+    let col = jit(tree.leaf, rr, 0.07);
+    if (tree.flush && top && rr() < 0.55) col = jit(tree.flush, rr, 0.08);
+    else if (rr() < 0.04) col = [0.5, 0.42, 0.12]; // an old yellowing leaf
+    leaf(kind, p, size * (0.8 + 0.45 * rr()), fw, nf, dn, ao, tree.sw(p[1]), 0.15 + rr() * 0.45, col, o.variant ?? 0, tree.ph + rr() * 0.3, rr());
+  }
+}
+
+// ---------------------------------------------------------------- trees
+let TREE_ID = 0;
+function newTree(x, z, H, rr, o = {}) {
+  const ph = rr(), base = gy(x, z);
+  const amp = o.amp ?? 0.5;
+  return { x, z, base, H, ph, tint: rr(), moss: o.moss ?? rr() * 0.3, mat: o.mat ?? 1, leaf: o.leaf ?? rr.pick(PAL), flush: o.flush, id: TREE_ID++,
+    sw: (y) => amp * pow(clamp((y - base) / H, 0, 1.2), 1.6) };
+}
+// emergent dipterocarp: huge straight bole, buttress fins, umbrella crown of cauliflower clumps
+function dipterocarp(geo, x, z, rr, sc = 1) {
+  const H = rr.r(42, 58) * sc, r0 = rr.r(1.0, 1.65) * sc;
+  const t = newTree(x, z, H, rr, { mat: rr() < 0.7 ? 1 : 4, flush: rr() < 0.4 ? rr.pick(FLUSH) : null, amp: 0.55 });
+  TREES.push([x, z, r0 + 1.5, H]);
+  geo.at(x, z);
+  const nf = 3 + rr.i(3), fins = [];
+  for (let i = 0; i < nf; i++) fins.push([(i / nf) * TAU + rr.n() * 0.5, rr.r(2.8, 6) * sc, rr.r(3.5, 8) * sc]);
+  const lean = [rr.n() * 0.03, 0, rr.n() * 0.03];
+  const trunkTop = t.base + H * 0.68;
+  const hs = [-1.2, -0.3, 0.3, 0.8, 1.4, 2.1, 3, 4.1, 5.4, 7];
+  const PB = hs.map((h) => [x + lean[0] * h, t.base + h, z + lean[2] * h]);
+  const R = (i, th) => {
+    const h = hs[i]; let r = r0 * (1 + 0.25 * sstep(3, -1, h));
+    for (const [a, L, fh] of fins) { const e = L * pow(clamp(1 - h / fh, 0, 1), 1.7); const c = cos(th - a); r += e * pow(max(c, 0), 30 + 12 / (e + 0.3)) + e * 0.12 * pow(max(c, 0), 4); }
+    return r * (1 + 0.04 * sin(th * 7 + h));
+  };
+  geo.tube(PB, R, 40, { mat: (i) => geo.setMat(t.mat, t.tint, mix(0.6, t.moss, sstep(-1, 7, hs[i])), 0.1), sway: () => geo.setSway(0, t.ph, 0, 0), ao: (i) => clamp(0.45 + hs[i] * 0.12, 0, 1) });
+  // upper bole
+  const PU = []; const n = 10;
+  for (let i = 0; i <= n; i++) { const h = 6.6 + (trunkTop - t.base - 6.6) * (i / n); PU.push([x + lean[0] * h + sin(h * 0.15 + t.ph * 9) * 0.25, t.base + h, z + lean[2] * h + cos(h * 0.12 + t.ph * 7) * 0.25]); }
+  geo.setMat(t.mat, t.tint, t.moss, 0);
+  geo.tube(PU, PU.map((_, i) => r0 * (1.02 - 0.32 * (i / n))), 14, { sway: (i, p) => geo.setSway(t.sw(p[1]), t.ph, 0, 0), ao: (i) => 0.75 + 0.25 * i / n });
+  if (rr() < 0.55) trunkVine(geo, t, PB[0], trunkTop, r0, rr);
+  if (rr() < 0.5) epiphytes(t, PU, r0 * 0.75, rr);
+  // crown: 4-6 limbs, each forking, clumps at the tips
+  const top = PU[n], nl = 4 + rr.i(3), crownR = rr.r(9, 14) * sc;
+  for (let i = 0; i < nl; i++) {
+    const a = (i / nl) * TAU + rr.n() * 0.4, el = rr.r(0.55, 1.1);
+    const d = [cos(a), el, sin(a)], L = crownR * rr.r(0.55, 0.85);
+    const P = curve(vadd(top, [0, -rr() * 3, 0]), d, L, 6, [0, 0.8, 0], rr, 0.12);
+    limb(geo, P, r0 * 0.45, r0 * 0.18, 9, t);
+    const tip = P[P.length - 1];
+    for (let j = 0; j < 2 + rr.i(2); j++) {
+      const s = P[3 + rr.i(3) - 1], aa = a + rr.n() * 1.4;
+      const Q = curve(s, [cos(aa), rr.r(0.3, 1.0), sin(aa)], rr.r(3, 6) * sc, 4, [0, 0.4, 0], rr, 0.2);
+      limb(geo, Q, r0 * 0.16, 0.05, 6, t);
+      crownClump(vadd(Q[3], [0, 1.2, 0]), rr.r(2.8, 4.2) * sc, t, rr);
+      PERCH.push(vadd(Q[2], [0, 0.3, 0]));
+    }
+    crownClump(vadd(tip, [0, 1.5, 0]), rr.r(3.2, 4.6) * sc, t, rr);
+    if (rr() < 0.5) lianaDrop(geo, tip, rr, t);
+  }
+  return t;
+}
+// main canopy and understory trees
+function canopyTree(geo, x, z, rr, H, o = {}) {
+  const r0 = o.r0 ?? rr.r(0.35, 0.75) * (0.4 + 0.6 * H / 28);
+  const t = newTree(x, z, H, rr, { mat: rr.pick([1, 2, 2, 4, 1, 3]), flush: rr() < 0.25 ? rr.pick(FLUSH) : null, amp: 0.45 });
+  TREES.push([x, z, r0 + 0.6, H]);
+  geo.at(x, z);
+  const forkH = H * rr.r(0.5, 0.68), n = 8;
+  const lean = [rr.n() * 0.12, 0, rr.n() * 0.12];
+  const P = [];
+  for (let i = 0; i <= n; i++) { const h = -0.6 + (forkH + 0.6) * (i / n); P.push([x + lean[0] * h + sin(h * 0.3 + t.ph * 5) * 0.2, t.base + h, z + lean[2] * h + cos(h * 0.25 + t.ph * 3) * 0.2]); }
+  geo.setMat(t.mat, t.tint, t.moss + 0.2, 0.05);
+  const fins = H > 24 && rr() < 0.5 ? 3 : 0, fa = rr() * TAU;
+  geo.tube(P, (i, th) => { const h = P[i][1] - t.base; let r = r0 * (1 - 0.3 * i / n); if (fins) r += r0 * 1.6 * pow(clamp(1 - h / 2.2, 0, 1), 2) * pow(max(cos((th - fa) * 1.5), 0), 8); return r; }, fins ? 18 : 10,
+    { sway: (i, p) => geo.setSway(t.sw(p[1]), t.ph, 0, 0), ao: (i) => 0.55 + 0.45 * i / n });
+  if (rr() < 0.25) trunkVine(geo, t, P[0], P[n][1], r0, rr);
+  if (rr() < 0.3) epiphytes(t, P, r0, rr);
+  const top = P[n], nl = 2 + rr.i(3), CR = H * rr.r(0.2, 0.3);
+  const leafKind = o.broad ? 1 : 0;
+  for (let i = 0; i < nl; i++) {
+    const a = (i / nl) * TAU + rr.n() * 0.6;
+    const Q = curve(top, [cos(a) * 0.8, 1, sin(a) * 0.8], (H - forkH) * rr.r(0.6, 0.9), 5, [0, 0.5, 0], rr, 0.2);
+    limb(geo, Q, r0 * 0.55, r0 * 0.15, 7, t);
+    for (let j = 0; j < 2; j++) {
+      const s = Q[2 + j], aa = a + rr.n() * 1.6;
+      const B = curve(s, [cos(aa), 0.5, sin(aa)], CR * rr.r(0.6, 1), 3, [0, 0.3, 0], rr, 0.25);
+      limb(geo, B, r0 * 0.2, 0.03, 5, t);
+      crownClump(vadd(B[2], [0, 0.6, 0]), CR * rr.r(0.45, 0.7), t, rr, leafKind ? { kind: 1, size: 0.55, dens: 9, variant: 0 } : { size: 1.0 });
+      PERCH.push(B[1]);
+    }
+    crownClump(vadd(Q[4], [0, 0.8, 0]), CR * rr.r(0.55, 0.8), t, rr, leafKind ? { kind: 1, size: 0.55, dens: 9, variant: 0 } : { size: 1.0 });
+  }
+  return t;
+}
+// banyan: braided trunk strands, long horizontal limbs, curtains of aerial roots, sprawling surface roots
+function banyan(geo, x, z, rr, o = {}) {
+  const H = rr.r(24, 30), t = newTree(x, z, H, rr, { mat: 3, amp: 0.3, leaf: [0.10, 0.25, 0.08] });
+  t.moss = 0.35;
+  TREES.push([x, z, 4.5, H]);
+  geo.at(x, z);
+  const ns = 6 + rr.i(4), th = 13 + rr() * 3;
+  for (let s = 0; s < ns; s++) {
+    const a0 = (s / ns) * TAU + rr.n() * 0.3, rad = rr.r(1.2, 2.6), tw = rr.r(-0.6, 0.6);
+    const P = []; for (let i = 0; i <= 9; i++) { const h = -1 + (th + 1) * (i / 9), a = a0 + tw * (h / th), rr2 = rad * (1 - 0.55 * (h / th)) + (h < 1.5 ? (1.5 - h) * 0.9 : 0); P.push([x + cos(a) * rr2, t.base + h, z + sin(a) * rr2]); }
+    geo.setMat(3, t.tint, 0.5, 0.05);
+    geo.tube(P, P.map((_, i) => rr.r(0.45, 0.85) * (1 - 0.3 * i / 9) + (i === 0 ? 0.4 : 0)), 10, { sway: (i, p) => geo.setSway(t.sw(p[1]) * 0.5, t.ph, 0, 0), ao: (i) => 0.5 + 0.5 * i / 9 });
+  }
+  const top = [x, t.base + th, z];
+  const nl = o.limbs ?? 6 + rr.i(3);
+  for (let i = 0; i < nl; i++) {
+    const a = (o.limbA && i < o.limbA.length) ? o.limbA[i] : (i / nl) * TAU + rr.n() * 0.3;
+    const L = (o.limbL ?? rr.r(11, 17));
+    const P = curve(vadd(top, [cos(a) * 1.5, -rr() * 2, sin(a) * 1.5]), [cos(a), rr.r(0.15, 0.4), sin(a)], L, 7, [0, -0.2, 0], rr, 0.1);
+    limb(geo, P, 0.7, 0.18, 9, t, 3);
+    for (let k = 1; k < P.length; k++) {
+      crownClump(vadd(P[k], [rr.n() * 2, 2 + rr() * 3, rr.n() * 2]), rr.r(3, 4.6), t, rr, { dens: 12, size: 1.0 });
+      if (k % 2 === 0) PERCH.push(P[k]);
+      // aerial roots: many thin, some thick pillar roots that reached the ground
+      const nr = 2 + rr.i(4);
+      for (let r = 0; r < nr; r++) {
+        const s = vlerp(P[k - 1], P[k], rr());
+        const thick = rr() < 0.18;
+        const g = gy(s[0], s[2]);
+        const len = thick ? s[1] - g + 0.5 : rr.r(3, s[1] - g - 1.5);
+        if (len < 1) continue;
+        const Q = []; const m = max(4, round(len / 1.5));
+        for (let j = 0; j <= m; j++) { const f = j / m; Q.push([s[0] + sin(f * 3 + r) * 0.15 * f, s[1] - len * f, s[2] + cos(f * 2.3 + r) * 0.15 * f]); }
+        geo.setMat(3, t.tint * 0.7, 0.2, 0);
+        const r0 = thick ? rr.r(0.18, 0.4) : rr.r(0.025, 0.06);
+        geo.tube(Q, Q.map((_, j) => r0 * (thick ? 1 + (j === m ? 0.6 : 0) : 1 - 0.6 * j / m)), thick ? 8 : 4, { sway: (j) => geo.setSway(thick ? 0 : 0.25 * (j / m), t.ph + r * 0.1, thick ? 0 : 0.6 * j / m, 0) });
+      }
+    }
+  }
+  // crown top
+  for (let i = 0; i < 6; i++) crownClump(vadd(top, [rr.n() * 8, rr.r(6, 11), rr.n() * 8]), rr.r(3.5, 5), t, rr, { dens: 12 });
+  // surface roots
+  for (let i = 0; i < 9; i++) {
+    const a = rr() * TAU, L = rr.r(5, 11), P = [];
+    for (let j = 0; j <= 8; j++) { const f = j / 8, px = x + cos(a + sin(f * 3) * 0.3) * (2 + L * f), pz = z + sin(a + sin(f * 3) * 0.3) * (2 + L * f); P.push([px, gy(px, pz) + 0.05 - f * 0.25 + (1 - f) * 0.5, pz]); }
+    geo.setMat(3, t.tint, 0.6, 0.1);
+    geo.tube(P, P.map((_, j) => 0.35 * (1 - j / 9) + 0.04), 7, { sway: () => geo.setSway(0, 0, 0, 0) });
+  }
+  return t;
+}
+// philodendron-type climbers spiralling up a trunk, with big leaves pressed to the bark
+function trunkVine(geo, t, b, topY, r0, rr) {
+  const P = [], a0 = rr() * TAU, turns = rr.r(0.6, 1.8), h0 = rr.r(0, 2), h1 = min(topY - t.base, rr.r(8, 30));
+  for (let i = 0; i <= 24; i++) { const f = i / 24, h = mix(h0, h1, f), a = a0 + f * turns * TAU, r = r0 * (1 - 0.2 * f) + 0.12 + (h < 6 ? sstep(6, 0, h) * 0.6 : 0); P.push([b[0] + cos(a) * r, t.base + h, b[2] + sin(a) * r]); }
+  geo.setMat(8, 0.2, 0.3, 0);
+  geo.tube(P, P.map(() => 0.035), 4, { sway: (i, p) => geo.setSway(t.sw(p[1]), t.ph, 0, 0) });
+  const col = rr() < 0.5 ? [0.12, 0.30, 0.06] : [0.18, 0.36, 0.08];
+  for (let i = 1; i < 24; i += 1) {
+    if (rr() < 0.3) continue;
+    const p = P[i], out = vnorm([p[0] - b[0], 0, p[2] - b[2]]);
+    const nf = vnorm(vadd(out, [rr.n() * 0.3, 0.3, rr.n() * 0.3]));
+    const fw = vnorm(vadd([0, -0.6, 0], vmul(vcross(nf, [0, 1, 0]), rr.n())));
+    leaf(1, vadd(p, vmul(out, 0.05)), rr.r(0.28, 0.55) * (1 + i / 30), fw, nf, out, 0.7, t.sw(p[1]), 0.1, jit(col, rr, 0.06), rr() < 0.5 ? 1 : 0, rr(), rr());
+  }
+}
+// bird's-nest ferns and orchids on trunks and forks
+function epiphytes(t, P, r0, rr) {
+  const n = 1 + rr.i(3);
+  for (let e = 0; e < n; e++) {
+    const i = 2 + rr.i(P.length - 3), p = P[i], a = rr() * TAU, out = [cos(a), 0, sin(a)];
+    const c = vadd(p, vmul(out, r0 + 0.1));
+    if (rr() < 0.6) {
+      for (let k = 0; k < 12; k++) {
+        const b = rr() * TAU, d = vnorm([cos(b) * 0.7 + out[0] * 0.5, 0.9, sin(b) * 0.7 + out[2] * 0.5]);
+        leaf(1, c, rr.r(0.6, 1.1), d, vnorm(vadd([0, 1, 0], vmul(d, -0.6))), d, 0.7, t.sw(c[1]), 0.6, jit([0.32, 0.48, 0.1], rr, 0.08), 3, rr(), rr());
+      }
+    } else {
+      const col = rr.pick([[0.9, 0.35, 0.75], [0.95, 0.95, 0.92], [0.75, 0.3, 0.85], [0.98, 0.7, 0.2]]);
+      for (let k = 0; k < 5; k++) {
+        const d = vnorm([out[0] + rr.n() * 0.5, -0.7, out[2] + rr.n() * 0.5]);
+        leaf(1, c, rr.r(0.25, 0.4), d, vnorm(vadd(out, [0, 0.5, 0])), out, 0.7, t.sw(c[1]), 0.2, [0.22, 0.38, 0.1], 3, rr(), rr());
+      }
+      for (let k = 0; k < 7; k++) { const q = vadd(c, [out[0] * (0.2 + k * 0.05) + rr.n() * 0.1, -0.1 - k * 0.07, out[2] * (0.2 + k * 0.05) + rr.n() * 0.1]); leaf(4, q, rr.r(0.08, 0.11), vnorm(vadd(out, [0, 0.4, 0])), out, out, 1, t.sw(c[1]), 0, jit(col, rr, 0.05), rr() < 0.7 ? 0 : 1, rr(), 0.5); }
+    }
+  }
+}
+// a liana dropping from a limb in a long loop
+function lianaDrop(geo, a, rr, t) {
+  const g = gy(a[0], a[2]);
+  const b = [a[0] + rr.n() * 8, g + rr.r(-0.2, 6), a[2] + rr.n() * 8];
+  if (b[1] > a[1] - 4) return;
+  const n = 26, P = [], sag = rr.r(2, 8);
+  for (let i = 0; i <= n; i++) { const f = i / n; const p = vlerp(a, b, f); p[1] -= sag * 4 * f * (1 - f); p[0] += sin(f * 9 + a[0]) * 0.2; p[2] += cos(f * 7 + a[2]) * 0.2; P.push(p); }
+  const r0 = rr.r(0.03, 0.08), twist = rr() < 0.4;
+  geo.setMat(8, rr(), rr() * 0.4, 0);
+  geo.tube(P, (i, th) => r0 * (twist ? 1 + 0.35 * sin(th * 2 + i * 1.3) : 1), 5, { sway: (i) => geo.setSway(0.55 * sin(PI * i / n) * (b[1] > g + 0.5 ? 1 : 0.4), t.ph + 0.37, 0.25 * sin(PI * i / n), 0) });
+  if (rr() < 0.5) for (let i = 3; i < n - 2; i += 2) { const p = P[i], d = randDir(rr); leaf(3, p, rr.r(0.15, 0.3), vnorm([d[0], -0.5, d[2]]), vnorm([d[0], 0.6, d[2]]), d, 0.8, 0.55 * sin(PI * i / n), 0.2, jit([0.16, 0.34, 0.07], rr, 0.08), 0, t.ph, rr()); }
+}
+// curtains of thin hanging roots / vines from a high point
+function hangCurtain(geo, a, rr, ph) {
+  const n = 3 + rr.i(6);
+  for (let k = 0; k < n; k++) {
+    const s = [a[0] + rr.n() * 2, a[1] - rr() * 1.5, a[2] + rr.n() * 2], g = gy(s[0], s[2]);
+    const len = min(rr.r(3, 14), s[1] - g - 0.3); if (len < 2) continue;
+    const m = max(6, round(len / 1.2)), Q = [], wx = rr.n() * 1.2, wz = rr.n() * 1.2;
+    for (let j = 0; j <= m; j++) { const f = j / m; Q.push([s[0] + sin(f * 3 + k) * 0.3 + wx * f * f, s[1] - len * f, s[2] + cos(f * 2.3 + k) * 0.3 + wz * f * f]); }
+    geo.setMat(8, 0.3 + rr() * 0.5, 0.15, 0);
+    geo.tube(Q, Q.map(() => rr.r(0.012, 0.025)), 3, { sway: (j) => geo.setSway(0.5 * (j / m), ph + k * 0.05, 0.7 * j / m, 0) });
+  }
+}
+// bamboo grove: arching culms with node rings, sprays of narrow leaves on the upper half
+function bambooGrove(geo, cx, cz, R, rr) {
+  const n = round(R * R * 1.6 + 8), ph = rr();
+  geo.at(cx, cz);
+  for (let i = 0; i < n; i++) {
+    const a = rr() * TAU, rd = sqrt(rr()) * R, x = cx + cos(a) * rd, z = cz + sin(a) * rd;
+    if (waterDist(x, z) < 0.6) continue;
+    const g = gy(x, z), H = rr.r(9, 17), r0 = rr.r(0.04, 0.075), lean = rr.r(0.05, 0.35) * (0.4 + rd / R);
+    const out = [cos(a), 0, sin(a)], yel = rr() < 0.25 ? rr.r(0.6, 1) : rr.r(0, 0.3);
+    const m = round(H / 0.42), P = [];
+    for (let j = 0; j <= m; j++) { const f = j / m, h = H * f; P.push([x + out[0] * lean * h * f * 1.4, g - 0.2 + h * (1 - lean * f * 0.5), z + out[2] * lean * h * f * 1.4]); }
+    const sw = (j) => 0.75 * pow(j / m, 1.8);
+    const tph = ph + rr() * 0.15;
+    geo._bt = 0;
+    geo.tube(P, P.map((_, j) => r0 * (1 - 0.55 * j / m) * (1 + 0.08 * (j % 1))), 6, {
+      mat: () => geo.setMat(9, 1, 0, 0),
+      sway: (j) => geo.setSway(sw(j), tph, 0.25 * j / m, yel),
+    });
+    // node rings: a slim darker band at every node
+    geo.setMat(9, 0.4, 0, 0);
+    for (let j = 2; j < m; j += 1) {
+      const p = P[j], q = P[j + 1], d = vnorm(vsub(q, p)), rn = r0 * (1 - 0.55 * j / m) * 1.18;
+      geo.setSway(sw(j), tph, 0.25 * j / m, yel);
+      geo.tube([vsub(p, vmul(d, 0.02)), vadd(p, vmul(d, 0.02))], [rn, rn], 6);
+    }
+    // leaves
+    for (let j = round(m * 0.4); j < m; j++) {
+      const k = rr() < 0.65 ? 2 : 1;
+      for (let s = 0; s < k; s++) {
+        const p = P[j], b = rr() * TAU, d = vnorm([cos(b) + out[0] * 0.8, rr.r(-0.6, 0.2), sin(b) + out[2] * 0.8]);
+        const nf = vnorm(vadd([0, 1, 0], vmul(d, -0.3)));
+        leaf(0, p, rr.r(0.7, 1.05), d, nf, vnorm(vadd(d, [0, 0.4, 0])), 0.4 + 0.6 * (j / m), sw(j), rr.r(0.4, 0.8), jit(rr() < 0.7 ? [0.26, 0.42, 0.09] : [0.38, 0.48, 0.12], rr, 0.08), 1, tph, rr());
+      }
+    }
+    if (rr() < 0.15) PERCH.push(P[round(m * 0.7)]);
+  }
+}
+// palms (fishtail) and tree ferns: slender trunk and a crown of fronds
+function palm(geo, x, z, rr, fern) {
+  const g = gy(x, z), H = fern ? rr.r(1.5, 3.5) : rr.r(3, 9), r0 = fern ? rr.r(0.12, 0.18) : rr.r(0.08, 0.13);
+  const t = newTree(x, z, H, rr, { amp: 0.25 });
+  geo.at(x, z);
+  const lean = [rr.n() * 0.25, 0, rr.n() * 0.25], P = [];
+  for (let i = 0; i <= 8; i++) { const h = -0.3 + (H + 0.3) * (i / 8); P.push([x + lean[0] * h * h / H, g + h, z + lean[2] * h * h / H]); }
+  geo.setMat(12, rr(), fern ? 0.5 : 0.2, 0);
+  geo.tube(P, P.map((_, i) => r0 * (fern ? 1 + 0.2 * (i / 8) : 1 - 0.2 * i / 8)), 7, { sway: (i, p) => geo.setSway(t.sw(p[1]), t.ph, 0, 0) });
+  const top = P[8], nfr = fern ? 11 + rr.i(5) : 7 + rr.i(5);
+  for (let i = 0; i < nfr; i++) {
+    const a = (i / nfr) * TAU + rr.n() * 0.2, el = fern ? rr.r(0.35, 1.3) : rr.r(0.9, 2.2);
+    const d = vnorm([cos(a), el, sin(a)]);
+    const nf = vnorm(vadd([0, 1, 0], vmul(d, -0.7)));
+    const L = fern ? rr.r(2.0, 3.0) : rr.r(2.2, 3.4);
+    leaf(2, top, L, d, nf, d, 0.75, t.sw(top[1]) + 0.1, fern ? rr.r(0.9, 1.0) : rr.r(0.85, 1.0), jit(fern ? [0.24, 0.42, 0.09] : [0.12, 0.27, 0.06], rr, 0.06), fern ? 0 : 2, t.ph + rr() * 0.2, rr());
+  }
+  if (!fern) PERCH.push(top);
+}
+// a fallen, moss-covered trunk lying along the ground
+function fallenLog(geo, x, z, a, L, r, rr) {
+  if (nearPose(x, z, L * 0.5 + 6)) return;
+  const P = [], dx = cos(a), dz = sin(a), n = round(L / 1.2);
+  let maxg = -1e9;
+  for (let i = 0; i <= n; i++) { const f = i / n, px = x + dx * L * (f - 0.5), pz = z + dz * L * (f - 0.5); maxg = max(maxg, gy(px, pz)); }
+  for (let i = 0; i <= n; i++) { const f = i / n, px = x + dx * L * (f - 0.5), pz = z + dz * L * (f - 0.5); P.push([px, max(gy(px, pz) + r * 0.55, maxg - 2.5 + r) + sin(f * 3) * 0.1, pz]); }
+  geo.at(x, z).setMat(11, rr(), 0.8, 0.3);
+  geo.tube(P, (i, th) => r * (1 - 0.25 * i / n) * (1 + 0.06 * sin(th * 5 + i)), 12, { sway: () => geo.setSway(0, 0, 0, 0), cap: true, ao: (i, th) => 0.6 + 0.4 * max(sin(th), 0) });
+  // ferns, mushrooms on the log
+  for (let i = 1; i < n; i += 2) {
+    const p = P[i];
+    if (rr() < 0.5) fernPlant([p[0], p[1] + r * 0.8, p[2]], rr, 0.6);
+    if (rr() < 0.5) mushrooms(geo, [p[0] + rr.n() * r, p[1] + r * 0.6, p[2] + rr.n() * r], rr, 0.6);
+  }
+}
+function mushrooms(geo, c, rr, s = 1) {
+  const n = 2 + rr.i(6), tint = rr();
+  for (let i = 0; i < n; i++) {
+    const p = [c[0] + rr.n() * 0.25, c[1], c[2] + rr.n() * 0.25], h = rr.r(0.03, 0.12) * s, cr = rr.r(0.025, 0.07) * s;
+    geo.setMat(10, tint, 0, 0).setSway(0, 0, 0, 0);
+    geo.lathe(p, [[0.008, -0.03], [cr * 0.25, 0], [cr * 0.22, h], [cr * 1.0, h], [cr * 0.9, h + cr * 0.35], [cr * 0.5, h + cr * 0.6], [0.001, h + cr * 0.7]], 7);
+  }
+}
+// ground plants
+function fernPlant(c, rr, s = 1) {
+  const n = 6 + rr.i(8), col = jit(rr.pick([[0.22, 0.42, 0.08], [0.16, 0.36, 0.08], [0.30, 0.46, 0.10], [0.13, 0.30, 0.10]]), rr, 0.06), ph = rr();
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * TAU + rr.n() * 0.3, el = rr.r(0.3, 1.1);
+    const d = vnorm([cos(a), el, sin(a)]);
+    leaf(2, c, rr.r(0.8, 1.7) * s, d, vnorm(vadd([0, 1, 0], vmul(d, -el * 0.8))), d, 0.6 + 0.4 * rr(), 0.35, rr.r(0.4, 0.9), jit(col, rr, 0.04), 0, ph, rr());
+  }
+}
+function broadPlant(c, rr, variant, s = 1) {
+  const n = variant === 2 ? 0 : 3 + rr.i(5), ph = rr();
+  const col = variant === 1 ? jit([0.10, 0.28, 0.08], rr, 0.05) : jit(rr.pick([[0.14, 0.32, 0.06], [0.24, 0.40, 0.08], [0.10, 0.24, 0.10]]), rr, 0.06);
+  for (let i = 0; i < n; i++) {
+    const a = rr() * TAU, el = rr.r(0.35, 1.2), h = (variant === 1 ? rr.r(0.25, 0.8) : rr.r(0.05, 0.35)) * s;
+    const p = [c[0] + cos(a) * 0.35 * h, c[1] + h, c[2] + sin(a) * 0.35 * h];
+    const d = vnorm([cos(a), el * 0.5, sin(a)]);
+    leaf(1, p, rr.r(0.5, 1.0) * s * (variant === 1 ? 1.3 : 1), d, vnorm(vadd([0, 1, 0], vmul(d, 0.2))), vnorm([d[0], 0.6, d[2]]), 0.65 + 0.3 * rr(), 0.3, rr.r(0.1, 0.4), jit(col, rr, 0.04), variant, ph, rr());
+  }
+}
+function banana(geo, x, z, rr) {
+  const g = gy(x, z), H = rr.r(2.2, 3.6), ph = rr();
+  geo.at(x, z).setMat(12, 0.6, 0.2, 0);
+  const P = [[x, g - 0.2, z], [x, g + H * 0.5, z], [x + rr.n() * 0.1, g + H, z + rr.n() * 0.1]];
+  geo.tube(P, [0.13, 0.11, 0.08], 8, { sway: (i) => geo.setSway(0.08 * i, ph, 0, 0) });
+  const n = 6 + rr.i(4);
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * TAU + rr.n() * 0.4, el = rr.r(0.5, 1.4);
+    const d = vnorm([cos(a), el, sin(a)]);
+    leaf(1, P[2], rr.r(1.6, 2.6), d, vnorm(vadd([0, 1, 0], vmul(d, -0.8))), vnorm([d[0], 0.5, d[2]]), 0.8, 0.35, rr.r(0.7, 0.95), jit(rr() < 0.15 ? [0.36, 0.36, 0.12] : [0.14, 0.30, 0.07], rr, 0.05), 2, ph, rr());
+  }
+}
+// a dense leafy shrub: the undergrowth that makes the forest feel impenetrable
+function shrub(c, rr, s = 1) {
+  const R = rr.r(0.7, 1.5) * s, h = rr.r(0.6, 1.6) * s, n = round(R * R * rr.r(110, 160)), ph = rr();
+  const col = jit(rr.pick([[0.10, 0.26, 0.06], [0.16, 0.33, 0.07], [0.08, 0.22, 0.08], [0.22, 0.36, 0.08], [0.13, 0.28, 0.12]]), rr, 0.05);
+  const ctr = [c[0], c[1] + h, c[2]];
+  for (let i = 0; i < n; i++) {
+    const d = randDir(rr); d[1] = d[1] * 0.75 + 0.1;
+    const sh = 0.55 + 0.45 * Math.cbrt(rr());
+    const p = [ctr[0] + d[0] * R * sh, max(ctr[1] + d[1] * h * sh, c[1] + 0.15), ctr[2] + d[2] * R * sh];
+    const nf = vnorm(vadd(vadd([0, 1, 0], vmul(d, 0.8)), [rr.n() * 0.6, 0, rr.n() * 0.6]));
+    let fw = vsub(d, vmul(nf, vdot(d, nf))); if (vlen(fw) < 0.1) fw = anyPerp(nf); fw = vnorm(fw);
+    leaf(1, p, rr.r(0.22, 0.42) * s, fw, nf, d, clamp(0.2 + 0.75 * sh * sh * (0.6 + 0.4 * d[1]), 0, 1), 0.25, rr.r(0.1, 0.4), jit(col, rr, 0.05), 0, ph, rr());
+  }
+}
+function herbs(c, rr, col) {
+  const n = 3 + rr.i(6), ph = rr();
+  for (let i = 0; i < n; i++) {
+    const a = rr() * TAU, el = rr.r(0.1, 1.0), d = vnorm([cos(a), el, sin(a)]);
+    const p = [c[0] + cos(a) * 0.05, c[1] + rr.r(0, 0.25), c[2] + sin(a) * 0.05];
+    leaf(3, p, rr.r(0.12, 0.32), d, vnorm(vadd([0, 1, 0], vmul(d, -el * 0.5))), vnorm([d[0], 0.7, d[2]]), 0.55 + 0.35 * rr(), 0.15, rr.r(0.1, 0.5), jit(col, rr, 0.07), 0, ph, rr());
+  }
+}
+function flowers(c, rr, col, n = 5) {
+  const ph = rr(), variant = col[3] ?? 0;
+  for (let i = 0; i < n; i++) {
+    const p = [c[0] + rr.n() * 0.5, c[1] + rr.r(0.1, 0.5), c[2] + rr.n() * 0.5];
+    leaf(4, p, rr.r(0.05, 0.1), vnorm([rr.n(), 1, rr.n()]), [0, 1, 0], [0, 1, 0], 1, 0.15, 0, jit(col, rr, 0.06), variant, ph + i * 0.1, 0.5);
+    leaf(3, [p[0], p[1] - 0.1, p[2]], 0.2, vnorm([rr.n(), 0.3, rr.n()]), [0, 1, 0], [0, 1, 0], 0.7, 0.15, 0.3, [0.2, 0.4, 0.08], 0, ph, 0.5);
+  }
+}
+function boulder(geo, x, z, r, rr, o = {}) {
+  if (slope(x, z) > 0.45 && !o.force) return;
+  if (typeof nearPose === 'function' && nearPose(x, z, r + 7)) return;
+  const g = gy(x, z), w = waterDist(x, z) < 1.5 ? 0.85 : 0.1;
+  geo.at(x, z).setMat(5, rr(), o.moss ?? rr() * 0.6, w).setSway(0, 0, 0, 0);
+  geo.blob([x, g + r * (o.sink ?? 0.15), z], r, rr() * 1e6 | 0, { sub: r > 2.5 ? 3 : 2, squash: o.squash ?? rr.r(0.55, 0.9), flat: 0.55, sx: rr.r(0.8, 1.3), sz: rr.r(0.8, 1.3) });
+}
+
+// ---------------------------------------------------------------- set pieces
+// the shrine: stepped plinth, small sanctuary with a dark doorway, two-tier roof with upturned eaves, stele
+function shrine(geo, rr) {
+  const { x, z, rot } = SHRINE, g = gy(x, z) - 0.25;
+  const ax = [cos(rot), 0, sin(rot)], az = [-sin(rot), 0, cos(rot)], up = [0, 1, 0];
+  const K = 1.6, P = (u, y, w) => [x + (ax[0] * u + az[0] * w) * K, g + y * K, z + (ax[2] * u + az[2] * w) * K];
+  const B = (u, y, w, hx, hy, hz, tilt = 0, taper = 1) => {
+    hx *= K; hy *= K; hz *= K;
+    const a = rotAxis(ax, up, tilt), c = rotAxis(az, up, tilt);
+    geo.setMat(6, rr(), 0.4 + rr() * 0.3, 0.1);
+    geo.box(P(u, y, w), hx, hy, hz, a, up, c, taper);
+  };
+  geo.at(x, z).setSway(0, 0, 0, 0);
+  // plinth: blocks, some slightly displaced
+  for (let i = -2; i <= 2; i++) for (let k = -2; k <= 2; k++) B(i * 1.25, 0.3, k * 1.25, 0.62, 0.42, 0.62, rr.n() * 0.03);
+  for (let i = -1; i <= 1; i++) for (let k = -1; k <= 1; k++) B(i * 1.2, 0.95, k * 1.2, 0.6, 0.25, 0.6, rr.n() * 0.02);
+  // steps toward the clearing (-az side)
+  for (let s = 0; s < 3; s++) B(0, 0.12 + s * 0.28, -3.6 + s * 0.45, 1.0, 0.14 + s * 0.14, 0.25, rr.n() * 0.04);
+  // sanctuary walls with a doorway facing the clearing
+  const wy = 1.2 + 1.1, wh = 1.1;
+  B(0, wy, 1.35, 1.5, wh, 0.18); B(-1.35, wy, 0, 0.18, wh, 1.5); B(1.35, wy, 0, 0.18, wh, 1.5);
+  B(-0.95, wy, -1.35, 0.55, wh, 0.18); B(0.95, wy, -1.35, 0.55, wh, 0.18); B(0, wy + 0.75, -1.35, 0.42, 0.35, 0.18);
+  // inner dark niche + altar stone
+  B(0, 1.55, 0.6, 0.45, 0.35, 0.35);
+  // roof tiers with upturned corner horns
+  const roof = (y, h, s, s2) => {
+    B(0, y, 0, s, h, s, 0, s2 / s);
+    for (const [cu, cw] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      const c = P(cu * s * 0.98, y - h * 0.4, cw * s * 0.98);
+      const d = vnorm([ax[0] * cu + az[0] * cw, 0.9, ax[2] * cu + az[2] * cw]);
+      geo.setMat(6, 0.4, 0.5, 0.1); geo.tube([c, vadd(c, vmul(d, 0.55)), vadd(c, vmul(vnorm(vadd(d, [0, 1.2, 0])), 1.0))], [0.18, 0.12, 0.04], 5);
+    }
+  };
+  B(0, 3.5, 0, 1.75, 0.12, 1.75);
+  roof(3.95, 0.35, 1.85, 1.1);
+  B(0, 4.45, 0, 0.95, 0.18, 0.95);
+  roof(4.85, 0.28, 1.2, 0.55);
+  // finial: stacked lotus
+  geo.setMat(6, 0.6, 0.6, 0.1);
+  geo.lathe(P(0, 5.1, 0), [[0.3, 0], [0.36, 0.1], [0.2, 0.25], [0.24, 0.35], [0.12, 0.55], [0.05, 0.8], [0.0, 0.9]].map(([a, b]) => [a * K, b * K]), 10);
+  // stele and two guardian posts
+  B(-2.0, 0.9, -4.6, 0.38, 0.9, 0.1, 0.2); B(-2.0, 1.85, -4.6, 0.42, 0.08, 0.14, 0.2);
+  for (const s of [-1, 1]) { B(s * 2.0, 0.55, -2.7, 0.22, 0.55, 0.22); geo.setMat(6, 0.5, 0.7, 0.1); geo.lathe(P(s * 2.0, 1.1, -2.7), [[0.2, 0], [0.24, 0.1], [0.12, 0.3], [0.0, 0.4]].map(([a, b]) => [a * K, b * K]), 8); }
+  // tumbled blocks around
+  for (let i = 0; i < 9; i++) { const a = rr() * TAU, d = rr.r(3.4, 5.5); B(cos(a) * d, 0.15, sin(a) * d, rr.r(0.25, 0.45), rr.r(0.15, 0.3), rr.r(0.25, 0.45), rr() * 3); }
+  // moss, ferns and small plants growing on the shrine
+  for (let i = 0; i < 10; i++) { const u0 = rr.n() * 1.6, w0 = rr.n() * 1.6; fernPlant(P(u0, 1.25, w0 + (abs(w0) < 1.4 && abs(u0) < 1.4 ? 2 : 0)), rr, 0.5); }
+  for (let i = 0; i < 6; i++) herbs(P(rr.n() * 1.5, 3.65, rr.n() * 1.5), rr, [0.25, 0.45, 0.1]);
+  for (let i = 0; i < 4; i++) fernPlant(P(rr.n() * 0.8, 4.65, rr.n() * 0.8), rr, 0.4);
+  flowers(P(-0.4, 1.0, -3.6), rr, [0.95, 0.75, 0.15, 1], 3);
+  FLY_CLEAR.push(P(0, 2, -7));
+  // roots of the banyan draping over the roof and down the walls
+  const bx = BANYAN_SHRINE[0], bz = BANYAN_SHRINE[1];
+  for (let i = 0; i < 9; i++) {
+    const side = rr.i(4), su = [1, -1, 0, 0][side], sw = [0, 0, 1, -1][side];
+    const along = rr.r(-1.3, 1.3);
+    const eu = su !== 0 ? su * 2.0 : along, ew = sw !== 0 ? sw * 2.0 : along;
+    const Q = [vadd(P(along * 0.3 + 2, 7.5 + rr() * 2, 2.5), [bx - x, 0, bz - z].map((v) => v * 0.4)), P(along * 0.4, 5.25, along * 0.2), P(eu * 0.62, 4.35, ew * 0.62), P(eu * 0.93, 3.9, ew * 0.93), P(eu * 0.85, 3.3, ew * 0.85), P(eu * 0.8, 2.0, ew * 0.8), P(eu * 0.95, 1.2, ew * 0.95), P(eu * 1.55, 0.8, ew * 1.55), P(eu * 2.3, -0.1, ew * 2.3)];
+    for (const q of Q.slice(1, -1)) { q[0] += rr.n() * 0.25; q[2] += rr.n() * 0.25; q[1] += rr.n() * 0.1; }
+    const R = Q.map((_, j) => (0.16 - j * 0.012) * rr.r(0.7, 1.3));
+    geo.setMat(3, 0.2 + rr() * 0.3, 0.25, 0.05).setSway(0, 0, 0, 0);
+    geo.tube(resampleCurve(Q, 30), (j, th) => (R[min(floor(j / 3.4), R.length - 1)] * 1.3 + 0.03) * (1 + 0.15 * sin(th * 3 + j)), 7);
+  }
+}
+const resampleCurve = (Q, n) => { const out = []; for (let i = 0; i <= n; i++) { const s = (i / n) * (Q.length - 1), k = min(floor(s), Q.length - 2), t = s - k; const a = Q[max(k - 1, 0)], b = Q[k], c = Q[k + 1], d = Q[min(k + 2, Q.length - 1)]; out.push([0, 1, 2].map((o) => 0.5 * (2 * b[o] + (c[o] - a[o]) * t + (2 * a[o] - 5 * b[o] + 4 * c[o] - d[o]) * t * t + (3 * b[o] - a[o] - 3 * c[o] + d[o]) * t * t * t))); } return out; };
+// suspension bridge: planks on a catenary, rope handrails and hangers, A-frame posts at both ends
+let BRIDGE_Y = 0;
+function bridge(geo, rr) {
+  const { x, z0, z1 } = BRIDGE;
+  const y0 = gy(x, z0) + 0.35, y1 = gy(x, z1) + 0.35, L = abs(z1 - z0), sag = L * 0.07;
+  BRIDGE_Y = (y0 + y1) / 2 - sag;
+  const deck = (f) => [x + sin(f * PI) * 0.6, mix(y0, y1, f) - sag * 4 * f * (1 - f), mix(z0, z1, f)];
+  const sw = (f) => 4 * f * (1 - f) * 0.6;
+  geo.at(x, (z0 + z1) / 2);
+  const n = round(L / 0.42);
+  for (let i = 1; i < n; i++) {
+    const f = i / n; if (rr() < 0.06) continue; // missing plank
+    const p = deck(f), q = deck(f + 0.01), d = vnorm(vsub(q, p));
+    const ax = [1, 0, 0], ay = vnorm(vcross(d, ax)), az = vcross(ax, ay);
+    const tw = rr.n() * (rr() < 0.1 ? 0.25 : 0.04);
+    geo.setMat(7, rr(), rr() * 0.4, 0.2).setSway(sw(f), 0.21, 0.3 * sw(f), 1);
+    geo.box(vadd(p, [rr.n() * 0.05, 0, 0]), 0.8 + rr.n() * 0.05, 0.055, 0.17, rotAxis(ax, ay, tw), ay, rotAxis(az, ay, tw));
+  }
+  const rope = (off, yo, r) => {
+    const P = []; for (let i = 0; i <= 40; i++) { const f = i / 40, p = deck(f); P.push([p[0] + off, p[1] + yo + (yo > 0 ? sag * 0.15 * 4 * f * (1 - f) : 0), p[2]]); }
+    geo.setMat(8, 0.7, 0.2, 0);
+    geo.tube(P, P.map(() => r), 5, { sway: (i) => geo.setSway(sw(i / 40), 0.21, 0.3 * sw(i / 40), 1) });
+    return P;
+  };
+  for (const s of [-1, 1]) {
+    rope(s * 0.78, -0.08, 0.05);
+    const H = rope(s * 0.88, 1.05, 0.045);
+    for (let i = 2; i < 40; i += 2) {
+      const f = i / 40, p = deck(f);
+      geo.setMat(8, 0.5, 0, 0);
+      geo.tube([[p[0] + s * 0.72, p[1], p[2]], [p[0] + s * 0.8, p[1] + 0.5, p[2]], H[i]], [0.012, 0.012, 0.012], 3, { sway: () => geo.setSway(sw(f), 0.21, 0.3 * sw(f), 1) });
+    }
+  }
+  // posts
+  for (const [zz, yy, dir] of [[z0, y0, -1], [z1, y1, 1]]) {
+    geo.setMat(7, 0.3, 0.6, 0.2).setSway(0, 0, 0, 0);
+    for (const s of [-1, 1]) {
+      geo.tube([[x + s * 0.95, yy - 1.2, zz + dir * 0.4], [x + s * 0.9, yy + 2.4, zz]], [0.24, 0.2], 8, { cap: true });
+      geo.tube([[x + s * 0.9, yy + 1.1, zz], [x + s * 1.3, gy(x + s * 1.3, zz + dir * 2.5), zz + dir * 2.5]], [0.025, 0.025], 4);
+    }
+    geo.box([x, yy + 1.45, zz], 1.05, 0.08, 0.08);
+    for (let i = 0; i < 3; i++) fernPlant([x + rr.n() * 2, gy(x, zz + dir * 2) , zz + dir * rr.r(1, 3)], rr, 0.8);
+    hangCurtain(geo, [x + rr.n() * 2, yy + 9, zz + dir * 2], rr, 0.3);
+  }
+  FLY_CLEAR.push(deck(0.5));
+}
+
+// ---------------------------------------------------------------- water surfaces
+// vertex: f32 x,y,z, flow.xy, fall, foam (28 B)
+const WATER = new Grow(Float32Array, 1 << 16), WIDX = new Grow(Uint32Array, 1 << 16);
+let nWV = 0;
+const wv = (x, y, z, fx, fz, fall, foam) => { WATER.need(7); WATER.a.set([x, y, z, fx, fz, fall, foam], WATER.n); WATER.n += 7; return nWV++; };
+const wq = (a, b, c, d) => { WIDX.need(6); WIDX.a.set([a, b, c, a, c, d], WIDX.n); WIDX.n += 6; };
+const FALLS = []; // spray sources: x, y, z, scale
+function waterRibbon(L, lev, hw, o = {}) {
+  let prev = null;
+  for (let i = 0; i < L.length; i++) {
+    const a = L[max(i - 1, 0)], b = L[min(i + 1, L.length - 1)];
+    let dx = b[0] - a[0], dz = b[1] - a[1]; const dl = hypot(dx, dz) || 1; dx /= dl; dz /= dl;
+    const drop = i < L.length - 1 ? lev[i] - lev[i + 1] : 0;
+    const sp = 0.25 + clamp(drop * 2.5, 0, 2.5) + (o.speed ?? 0);
+    const foam = clamp((drop - 0.25) * 1.2, 0, 0.8);
+    const w = hw(i) + 0.9;
+    const l = wv(L[i][0] - dz * w, lev[i], L[i][1] + dx * w, dx * sp, dz * sp, 0, foam);
+    const r = wv(L[i][0] + dz * w, lev[i], L[i][1] - dx * w, dx * sp, dz * sp, 0, foam);
+    const inPool = o.pools && o.pools.some((p) => hypot(L[i][0] - p[0], L[i][1] - p[1]) < p[2] - 1 && hypot(L[max(i - 1, 0)][0] - p[0], L[max(i - 1, 0)][1] - p[1]) < p[2] - 1);
+    if (prev && !inPool) wq(prev[0], l, r, prev[1]);
+    prev = [l, r];
+    if (drop > 0.8) FALLS.push([L[i][0] + dx, lev[i + 1], L[i][1] + dz, 0.5]);
+  }
+}
+function waterfall(top, bottomY, dir, w0, w1) {
+  // a curtain bending outward from the lip
+  const n = 24, H = top[1] - bottomY;
+  const side = vnorm(vcross(dir, [0, 1, 0]));
+  let prev = null;
+  for (let i = 0; i <= n; i++) {
+    const f = i / n, y = top[1] - H * f, out = 2.2 * sqrt(f * H / 9.8) * 1.2;
+    const c = [top[0] + dir[0] * out, y, top[2] + dir[2] * out], w = mix(w0, w1, f) / 2;
+    const l = wv(c[0] - side[0] * w, c[1], c[2] - side[2] * w, -1, 0, 1, f > 0.85 ? 1 : 0.3);
+    const r = wv(c[0] + side[0] * w, c[1], c[2] + side[2] * w, 1, 0, 1, f > 0.85 ? 1 : 0.3);
+    if (prev) wq(prev[0], prev[1], r, l); // double-sided via cull none
+    prev = [l, r];
+  }
+  FALLS.push([top[0] + dir[0] * 2.5, bottomY, top[2] + dir[2] * 2.5, 1.6]);
+}
+
+// ---------------------------------------------------------------- creatures (meshes in the static vertex format)
+function birdMesh() {
+  const g = new Geo(); g.setSway(0, 0, 0, 0);
+  g._u[0] = 0; g.mat = g._f[0];
+  g.lathe([0, 0, -0.1], [[0.0, 0], [0.035, 0.03], [0.05, 0.09], [0.045, 0.15], [0.035, 0.19], [0.04, 0.22], [0.035, 0.26], [0.0, 0.28]], 8, [0, 0, 1]);
+  g._u[0] = 3 << 8; g.mat = g._f[0];
+  g.lathe([0, 0.0, 0.17], [[0.013, 0], [0.0, 0.05]], 5, [0, 0, 1]);
+  g._u[0] = 2 << 8; g.mat = g._f[0];
+  // tail
+  const t0 = g.v(-0.03, 0, -0.1, 0, 1, 0), t1 = g.v(0.03, 0, -0.1, 0, 1, 0), t2 = g.v(0.05, -0.01, -0.22, 0, 1, 0), t3 = g.v(-0.05, -0.01, -0.22, 0, 1, 0); g.quad(t0, t1, t2, t3);
+  g._u[0] = 1 << 8; g.mat = g._f[0];
+  for (const s of [-1, 1]) {
+    const span = [0.02, 0.12, 0.2];
+    const ids = span.map((x, i) => { g.setSway(i / 2 + 0.01, 0, 0, 0); const a = g.v(s * x, 0.02, 0.06 - i * 0.015, 0, 1, 0); const b = g.v(s * x, 0.02, -0.04 - i * 0.02 + (i === 2 ? 0.07 : 0), 0, 1, 0); return [a, b]; });
+    g._u[0] = 1 << 8; g.mat = g._f[0];
+    for (let i = 0; i < 2; i++) if (s > 0) g.quad(ids[i][0], ids[i][1], ids[i + 1][1], ids[i + 1][0]); else g.quad(ids[i][0], ids[i + 1][0], ids[i + 1][1], ids[i][1]);
+    g.setSway(0, 0, 0, 0);
+  }
+  return g;
+}
+function butterflyMesh() {
+  const g = new Geo(); g._u[0] = 3 << 8; g.mat = g._f[0]; g.setSway(0, 0, 0, 0);
+  g.lathe([0, 0, -0.012], [[0, 0], [0.002, 0.005], [0.002, 0.025], [0, 0.03]], 4, [0, 0, 1]);
+  g._u[0] = 0; g.mat = g._f[0];
+  for (const s of [-1, 1]) {
+    for (const [z0, z1, w] of [[0.004, 0.045, 0.05], [-0.004, -0.04, 0.042]]) {
+      g.setSway(0.01, 0, 0, 0); const a = g.v(s * 0.002, 0, z0 * 0.2, 0, 1, 0), b = g.v(s * 0.002, 0, z1 * 0.3, 0, 1, 0);
+      g.setSway(1, 0, 0, 0); const c = g.v(s * w, 0, z1, 0, 1, 0), d = g.v(s * w * 0.9, 0, z0, 0, 1, 0);
+      if (s > 0) g.quad(a, b, c, d); else g.quad(a, d, c, b);
+    }
+  }
+  return g;
+}
+function dragonflyMesh() {
+  const g = new Geo(); g._u[0] = 0; g.mat = g._f[0]; g.setSway(0, 0, 0, 0);
+  g.lathe([0, 0, -0.05], [[0, 0], [0.003, 0.01], [0.003, 0.06], [0.006, 0.075], [0.005, 0.085], [0, 0.09]], 4, [0, 0, 1]);
+  g._u[0] = 2 << 8; g.mat = g._f[0];
+  for (const s of [-1, 1]) for (const z0 of [0.03, 0.015]) {
+    g.setSway(0.01, 0, 0, 0); const a = g.v(s * 0.003, 0.004, z0, 0, 1, 0), b = g.v(s * 0.003, 0.004, z0 - 0.008, 0, 1, 0);
+    g.setSway(1, 0, 0, 0); const c = g.v(s * 0.045, 0.004, z0 - 0.01, 0, 1, 0), d = g.v(s * 0.045, 0.004, z0 - 0.002, 0, 1, 0);
+    if (s > 0) g.quad(a, b, c, d); else g.quad(a, d, c, b);
+  }
+  return g;
+}
+const meshOut = (g) => { const v = new Float32Array(g.f.view()); const I = []; for (const c of g.idx) for (let i = 0; i < c.n; i++) I.push(c.a[i]); return { v, i: new Uint32Array(I) }; };
+
+// ============================================================================
+// renderer, world assembly, camera and input
+// ============================================================================
+const $ = (id) => document.getElementById(id);
+const canvas = $('c'), info = $('i'), body = document.body;
+const QS = new URLSearchParams(location.search);
+const SCALE = +QS.get('scale') || 1;
+const say = (m) => new Promise((r) => { $('s').textContent = m; setTimeout(r, 16); });
+const T0 = performance.now(), stamp = (m) => console.log(`[${((performance.now() - T0) / 1000).toFixed(2)}s] ${m}`);
+if (!navigator.gpu) throw new Error('this scene needs WebGPU (current Chrome or Edge)');
+const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+if (!adapter) throw new Error('no WebGPU adapter');
+const hasTS = adapter.features.has('timestamp-query') && !QS.has('nots');
+const device = await adapter.requestDevice({
+  requiredFeatures: hasTS ? ['timestamp-query'] : [],
+  requiredLimits: { maxBufferSize: adapter.limits.maxBufferSize, maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize },
+});
+device.addEventListener('uncapturederror', (e) => console.error('GPU: ' + e.error.message));
+device.lost.then((l) => { if (l.reason !== 'destroyed') { body.className = 'e'; $('s').textContent = 'The graphics device was lost: ' + l.message; } });
+const ctx = canvas.getContext('webgpu'), FMT = navigator.gpu.getPreferredCanvasFormat();
+const Q = device.queue, HDR = 'rgba16float', DEPTH = 'depth32float', AA = 4, SHADOW = 8192;
+const TU = GPUTextureUsage, BU = GPUBufferUsage, SS = GPUShaderStage, VF = SS.VERTEX | SS.FRAGMENT;
+const mod = (code, label) => { const m = device.createShaderModule({ code, label }); m.getCompilationInfo().then((i) => { for (const x of i.messages) if (x.type === 'error') console.error(label, x.lineNum, x.message); }); return m; };
+const buf = (data, usage) => { const b = device.createBuffer({ size: (data.byteLength + 3) & ~3, usage: usage | BU.COPY_DST }); Q.writeBuffer(b, 0, data.buffer, data.byteOffset, data.byteLength); return b; };
+const tex = (w, h, format, usage, o = {}) => device.createTexture({ size: [w, h, o.d || 1], format, usage, sampleCount: o.s || 1, dimension: o.d ? '3d' : '2d' });
+
+// ---------------------------------------------------------------- terrain
+await say('Raising the karst…');
+buildGround();
+for (const c of CARVE) { c[1] += gAt(GH, c[0], c[2]); c[4] += gAt(GH, c[3], c[5]); }
+let D;
+{
+  const m = mod(W_DENS, 'dens'), p = device.createComputePipeline({ layout: 'auto', compute: { module: m, entryPoint: 'main' } });
+  const size = NX * NY * NZ * 4;
+  const bg = buf(GH, BU.STORAGE), bk = buf(karstBuf(), BU.STORAGE), bc = buf(carveBuf(), BU.STORAGE);
+  const bd = device.createBuffer({ size, usage: BU.STORAGE | BU.COPY_SRC }), br = device.createBuffer({ size, usage: BU.MAP_READ | BU.COPY_DST });
+  const g = device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: [bg, bd, bk, bc].map((b, i) => ({ binding: i, resource: { buffer: b } })) });
+  const e = device.createCommandEncoder(), c = e.beginComputePass();
+  c.setPipeline(p); c.setBindGroup(0, g); c.dispatchWorkgroups(NX / 4, NY / 4, NZ / 4); c.end();
+  e.copyBufferToBuffer(bd, 0, br, 0, size);
+  Q.submit([e.finish()]);
+  await br.mapAsync(GPUMapMode.READ);
+  D = new Float32Array(br.getMappedRange().slice(0));
+  br.unmap(); br.destroy(); bd.destroy(); bg.destroy(); bk.destroy(); bc.destroy();
+}
+stamp('density');
+await say('Carving canyons…');
+const SN = surfaceNets(D);
+TOP = SN.TOP;
+stamp(`surface nets: ${SN.nv} verts, ${SN.Q.length / 4} quads`);
+// camera collision: signed distance to rock, quantised, same grid as the density
+const COL = new Int8Array(D.length);
+for (let i = 0; i < D.length; i++) COL[i] = clamp(round(D[i] * 30), -127, 127);
+const dAt = (x, y, z) => { // trilinear density (metres, > 0 solid)
+  const fx = clamp((x - OX) / VS, 0, NX - 1.001), fy = clamp((y - OY) / VS, 0, NY - 1.001), fz = clamp((z - OZ) / VS, 0, NZ - 1.001);
+  const i = fx | 0, j = fy | 0, k = fz | 0, u = fx - i, v = fy - j, w = fz - k, b = i + NX * (j + NY * k), SXY = NX * NY;
+  const c00 = mix(COL[b], COL[b + 1], u), c10 = mix(COL[b + NX], COL[b + NX + 1], u), c01 = mix(COL[b + SXY], COL[b + SXY + 1], u), c11 = mix(COL[b + SXY + NX], COL[b + SXY + NX + 1], u);
+  return mix(mix(c00, c10, v), mix(c01, c11, v), w) / 30;
+};
+const DSN = (x, y, z) => D[clamp(round((x - OX) / VS), 0, NX - 1) + NX * (clamp(round((y - OY) / VS), 0, NY - 1) + NY * clamp(round((z - OZ) / VS), 0, NZ - 1))];
+
+// ---------------------------------------------------------------- camera path and viewpoints
+// ground under the camera: highest ground and water within a radius, so the path floats over ravines and pools
+const camGround = (x, z, r = 4) => { let h = -1e9; for (let a = 0; a < 8; a++) { const px = x + cos(a * 0.785) * r, pz = z + sin(a * 0.785) * r; h = max(h, gy(px, pz)); } return max(h, gy(x, z)); };
+// [x, z, height above ground, look x, look z, look height above ground]
+const FLYP = [
+  [-6, 20, 1.8, -8, -30, 4.5], [-3, 6, 2.1, -6, -30, 3.5], [-3, -12, 2.4, 0, -40, 3], [1, -24, 2.6, 13, -34, 3],
+  [5, -42, 3.2, 4, -60, 3], [-4, -60, 3.4, -6, -82, 3], [-4, -82, 3.8, 2, -100, 4], [3, -102, 4.5, 6, -130, -4],
+  [-6, -124, 3, -40, -144, -6], [-30, -138, -5, -58, -143, -6], [-58, -143, -6.5, -80, -140, -2],
+  [-78, -126, 3, -81.5, -96, 3], [-78, -96, 2.5, -94.5, -72, 0], [-81.5, -84.5, 0, -107.5, -59.6, 0], [-107.5, -59.6, 0, -112, -30, 3], [-112, -36, 3, -100, -10, 3],
+  [-100, -18, 4, -72, 18, 4], [-72, 18, 4, -45, 50, 5], [-42, 50, 5, -10, 70, 4], [-10, 70, 4, 22, 80, 3],
+  [22, 80, 3, 48, 92, 3], [46, 90, 3, 72, 108, 10], [60, 99, 2.4, 77, 111, 14],
+];
+const POSES = [
+  [-6, 20, 1.8, -8, -30, 4.5], [-1, -27, 1.7, 13, -33, 3.8], [60, 94, 3.6, 76, 110, 7],
+  [120, -60, 1.6, 123, -52, 40], [-22, -126, 2.5, -58, -143, -2], [-85, -81, 1.8, -94.5, -72, 0],
+];
+const overRav = (x, z) => sInfo(x, z, 3) < RAV_RIM + 4;
+const flyY = (x, z, h) => (h === 0 ? CARVE[0][1] - 0.5 : camGround(x, z, overRav(x, z) ? 20 : 6) + h);
+const FLY = new Float32Array(FLYP.length * 6);
+FLYP.forEach((p, i) => FLY.set([p[0], flyY(p[0], p[1], p[2]), p[1], p[3], camGround(p[3], p[4], overRav(p[3], p[4]) ? 20 : 2) + p[5], p[4]], i * 6));
+for (const p of POSES) { p[2] = camGround(p[0], p[1], 2) + p[2]; p[5] = p[5] === 0 ? CARVE[0][1] : camGround(p[3], p[4], 2) + p[5]; }
+POSES[3][5] = POSES[3][2] + 40;
+for (let i = 0; i < FLYP.length - 1; i++) for (let k = 0; k < 8; k++) { const t = k / 8; FLY_CLEAR.push([mix(FLY[i * 6], FLY[i * 6 + 6], t), 0, mix(FLY[i * 6 + 2], FLY[i * 6 + 8], t)]); }
+for (const p of POSES) for (let k = 0; k < 6; k++) FLY_CLEAR.push([p[0] + (p[3] - p[0]) * k * 0.05, 0, p[1] + (p[4] - p[1]) * k * 0.05]);
+
+// ---------------------------------------------------------------- world content
+await say('Growing the forest…');
+const geo = new Geo();
+{ // terrain into the static geometry
+  const P = SN.P, N = SN.N, base = geo.nv;
+  for (let i = 0; i < SN.nv; i++) {
+    const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2], nx = N[i * 3], ny = N[i * 3 + 1], nz = N[i * 3 + 2];
+    const [kd] = karstDist(x, z);
+    const wd = waterDist(x, z), lev = sInfo(x, z, 1);
+    let wet = y < lev + 1.2 ? sstep(3, 0, wd) : 0;
+    wet = max(wet, 0.6 * sstep(14, 4, hypot(x - FALL_MAIN.x, z - FALL_MAIN.z)), sstep(8, 0, sInfo(x, z, 3) - RAV_HW) * sstep(-15, -25, y));
+    const occ = DSN(x + nx * 2.5, y + ny * 2.5, z + nz * 2.5);
+    const ao = clamp(1 - max(occ + 2.5, 0) / 4, 0.35, 1);
+    geo.setMat(0, kd < 1.5 ? 1 : 0, sstep(0.3, 0.8, vn2(x * 0.05, z * 0.05)) * 0.3, wet).setSway(0, 0, 0, 0);
+    geo.v(x, y, z, nx, ny, nz, ao);
+  }
+  const Qd = SN.Q;
+  for (let q = 0; q < Qd.length; q += 4) { const a = Qd[q] + base; geo.at(P[(a - base) * 3], P[(a - base) * 3 + 2]); geo.quad(a, Qd[q + 1] + base, Qd[q + 2] + base, Qd[q + 3] + base); }
+}
+D = null;
+stamp('terrain geo');
+const rr = RNG(1234);
+const nearPose = (x, z, r) => { for (const p of POSES) if (p !== POSES[3]) if (hypot(p[0] - x, p[1] - z) < r) return true; return false; };
+const inGap = (x, z, pad) => { if (nearPose(x, z, 6 + pad)) return true; if (hypot(x - POOLS[0][0], z - POOLS[0][1]) < 24 + pad) return true; for (const g of GAPS) if (hypot(x - g[0], z - g[1]) < g[2] + pad) return true; return false; };
+const trunkFree = (x, z, r) => { for (const t of TREES) if (hypot(t[0] - x, t[1] - z) < t[2] + r) return false; return true; };
+const okGround = (x, z, o = {}) => {
+  if (abs(x) > (o.lim ?? 248) || abs(z) > (o.lim ?? 248)) return false;
+  if (waterDist(x, z) < (o.water ?? 2)) return false;
+  if (sInfo(x, z, 3) < RAV_RIM + (o.rav ?? 3)) return false;
+  if (slope(x, z) > (o.slope ?? 0.35)) return false;
+  if (hypot(x - SHRINE.x, z - SHRINE.z) < (o.shrine ?? 12)) return false;
+  if (abs(x - BRIDGE.x) < 4 && z < BRIDGE.z0 + 4 && z > BRIDGE.z1 - 4) return false;
+  return true;
+};
+// set pieces first (so trees keep clear of them)
+shrine(geo, RNG(7));
+banyan(geo, BANYAN_SHRINE[0], BANYAN_SHRINE[1], RNG(8), { limbA: [atan2(SHRINE.z - BANYAN_SHRINE[1], SHRINE.x - BANYAN_SHRINE[0]) - 0.2, atan2(SHRINE.z - BANYAN_SHRINE[1], SHRINE.x - BANYAN_SHRINE[0]) + 0.5] });
+bridge(geo, RNG(9));
+// a hero dipterocarp and a bamboo grove in the opening views
+dipterocarp(geo, -21, -2, RNG(31), 1.15);
+bambooGrove(geo, 14, 2, 4.5, RNG(32));
+POSES[4][0] = -30; POSES[4][1] = -141; POSES[4][2] = BRIDGE_Y + 3 - 2; POSES[4][3] = -58; POSES[4][4] = -143; POSES[4][5] = BRIDGE_Y - 1.5;
+for (const [x, z] of [[-74, -24], [64, -6], [-34, 84], [104, 54], [-128, 36], [30, 150], [-150, -110], [140, -100], [-20, -170], [-200, 40], [190, 10], [80, -110]]) {
+  let px = x, pz = z;
+  for (let k = 0; k < 20 && !(okGround(px, pz, { water: 6, slope: 0.3 }) && !nearFly(px, pz, 6) && trunkFree(px, pz, 6)); k++) { px = x + rr.n() * 12; pz = z + rr.n() * 12; }
+  if (okGround(px, pz, { water: 6, slope: 0.3 }) && !nearFly(px, pz, 6)) banyan(geo, px, pz, rr);
+}
+stamp('set pieces');
+// emergent dipterocarps
+for (let gz = -250; gz < 250; gz += 19) for (let gx = -250; gx < 250; gx += 19) {
+  const x = gx + rr.r(0, 19), z = gz + rr.r(0, 19);
+  if (!okGround(x, z, { water: 4, slope: 0.32 }) || inGap(x, z, 9) || hypot(x - CLEAR.x, z - CLEAR.z) < CLEAR.r + 10 || nearFly(x, z, 4) || !trunkFree(x, z, 5)) continue;
+  if (karstDist(x, z)[0] < 0) { if (rr() < 0.5) canopyTree(geo, x, z, rr, rr.r(10, 16)); continue; }
+  if (rr() < 0.82) dipterocarp(geo, x, z, rr);
+}
+stamp('emergents');
+// main canopy and understory
+for (let gz = -250; gz < 250; gz += 9.5) for (let gx = -250; gx < 250; gx += 9.5) {
+  const x = gx + rr.r(0, 9.5), z = gz + rr.r(0, 9.5);
+  if (!okGround(x, z, { water: 2.5, slope: 0.45 }) || inGap(x, z, 3) || hypot(x - CLEAR.x, z - CLEAR.z) < CLEAR.r + 3 || nearFly(x, z, 3) || !trunkFree(x, z, 1.5)) continue;
+  const big = rr() < 0.55;
+  canopyTree(geo, x, z, rr, big ? rr.r(22, 34) : rr.r(9, 17), { broad: !big && rr() < 0.6 });
+}
+stamp('canopy');
+for (let gz = -246; gz < 246; gz += 9) for (let gx = -246; gx < 246; gx += 9) {
+  const x = gx + rr.r(0, 9), z = gz + rr.r(0, 9);
+  if (!okGround(x, z, { water: 1.5, slope: 0.5, rav: 1 }) || nearFly(x, z, 2) || !trunkFree(x, z, 1) || rr() < 0.45) continue;
+  palm(geo, x, z, rr, true); TREES.push([x, z, 0.4, 5]);
+}
+stamp('palms');
+// bamboo groves
+for (const [x, z, r] of [[34, 8, 5], [-40, -2, 4.5], [38, -62, 5], [-30, 56, 4], [62, 64, 5], [-92, -122, 4], [96, -60, 5], [-120, 70, 5], [20, 104, 4], [-62, -60, 4], [150, 110, 5], [-170, -70, 6], [90, 160, 5], [-30, 130, 4], [120, -10, 4]]) {
+  if (okGround(x, z, { water: 1, slope: 0.6 }) && !nearFly(x, z, r + 2)) bambooGrove(geo, x, z, r, rr);
+}
+stamp('bamboo');
+// hanging curtains of roots and vines under the crowns
+for (const c of CLUMPS) if (rr() < 0.015 && c[1] > 12 && !nearFly(c[0], c[2], 3)) hangCurtain(geo, [c[0], c[1] - c[3] * 0.5, c[2]], rr, rr());
+// lianas between crowns
+for (let i = 0; i < 260; i++) {
+  const a = CLUMPS[rr.i(CLUMPS.length)], b = CLUMPS[rr.i(CLUMPS.length)];
+  const d = hypot(a[0] - b[0], a[2] - b[2]);
+  if (d < 8 || d > 26 || a[1] < 15 || b[1] < 15) continue;
+  const n = 24, P = [], sag = d * rr.r(0.25, 0.6), A = [a[0], a[1] - a[3] * 0.5, a[2]], B = [b[0], b[1] - b[3] * 0.5, b[2]];
+  let low = 1e9;
+  for (let k = 0; k <= n; k++) { const f = k / n, p = vlerp(A, B, f); p[1] -= sag * 4 * f * (1 - f); P.push(p); low = min(low, p[1] - gy(p[0], p[2])); }
+  if (low < 3 || nearFly(P[12][0], P[12][2], 2.5) && P[12][1] - gy(P[12][0], P[12][2]) < 8) continue;
+  geo.at(P[12][0], P[12][2]).setMat(8, rr(), rr() * 0.5, 0);
+  const r0 = rr.r(0.03, 0.09), ph = rr();
+  geo.tube(P, (k, th) => r0 * (1 + 0.3 * sin(th * 2 + k)), 5, { sway: (k) => geo.setSway(0.6 * sin(PI * k / n), ph, 0.2 * sin(PI * k / n), 0) });
+}
+stamp('lianas');
+// rocks: stream banks, karst talus, scattered and enormous boulders
+for (let i = 0; i < STREAM.length; i += 1) {
+  const [x, z] = STREAM[i];
+  if (rr() < 0.55) { const a = rr() * TAU, hw = sInfo(x, z, 2), d = hw + rr.r(-0.5, 1.8); boulder(geo, x + cos(a) * d, z + sin(a) * d, rr.r(0.35, 1.3), rr, { moss: rr() * 0.5, sink: 0.25 }); }
+  if (rr() < 0.15) boulder(geo, x + rr.n() * 1.5, z + rr.n() * 1.5, rr.r(0.25, 0.6), rr, { moss: 0.1, sink: 0.4 });
+}
+for (const k of KARST) {
+  const L = hypot(k[2] - k[0], k[3] - k[1]) + k[4] * TAU, n = round(L / 6);
+  for (let i = 0; i < n; i++) {
+    const a = rr() * TAU, t = rr(), cx = mix(k[0], k[2], t), cz = mix(k[1], k[3], t), d = k[4] * 1.15 + rr.r(0, 9);
+    const x = cx + cos(a) * d, z = cz + sin(a) * d;
+    if (abs(x) > 250 || abs(z) > 250 || waterDist(x, z) < 1 || nearFly(x, z, 3)) continue;
+    boulder(geo, x, z, rr.r(0.8, 3.5), rr, { moss: 0.4 + rr() * 0.5 });
+  }
+}
+for (let gz = -240; gz < 240; gz += 12) for (let gx = -240; gx < 240; gx += 12) {
+  const x = gx + rr.r(0, 12), z = gz + rr.r(0, 12);
+  if (rr() > 0.3 || !okGround(x, z, { water: 1, slope: 0.6 }) || nearFly(x, z, 2.5) || !trunkFree(x, z, 1)) continue;
+  boulder(geo, x, z, rr.r(0.4, 2.2), rr, { moss: 0.5 + rr() * 0.5 });
+}
+for (const [x, z, r] of [[-28, -40, 6], [24, -16, 5], [-52, 8, 7], [40, 40, 5.5], [-70, -70, 6], [70, 84, 5], [96, 96, 7], [-120, -10, 6], [-14, 40, 4.5], [-110, -120, 6]]) {
+  if (okGround(x, z, { water: 3, slope: 0.6, shrine: 9 }) && !nearFly(x, z, r + 2)) { boulder(geo, x, z, r, rr, { moss: 0.75, squash: 0.7, sink: 0.25 }); TREES.push([x, z, r, 0]); }
+}
+stamp('rocks');
+{ // plants clinging to ledges of the karst and the ravine walls, vines hanging over the edges
+  const r3 = RNG(55), P = SN.P, N = SN.N;
+  for (let i = 0; i < SN.nv; i++) {
+    const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2], ny = N[i * 3 + 1];
+    if (ny < 0.15 || abs(x) > 245 || abs(z) > 245) continue;
+    const kd = karstDist(x, z)[0], rav = sInfo(x, z, 3) < RAV_RIM + 2 && y < gy(x, z) + 1;
+    if (kd > 2 && !rav) continue;
+    if (y < gy(x, z) - 1.5 && r3() < 0.5) continue;
+    const q = r3();
+    if (q < 0.09 && ny > 0.4) shrub([x, y - 0.2, z], r3, 0.7);
+    else if (q < 0.2) fernPlant([x, y - 0.05, z], r3, 0.7);
+    else if (q < 0.16) herbs([x, y, z], r3, [0.16, 0.34, 0.07]);
+    if (ny < 0.75 && r3() < 0.006) hangCurtain(geo.at(x, z), [x + N[i * 3] * 0.5, y, z + N[i * 3 + 2] * 0.5], r3, r3());
+  }
+}
+stamp('ledges');
+// fallen trees
+for (let i = 0; i < 26; i++) {
+  const x = rr.r(-220, 220), z = rr.r(-220, 220);
+  if (!okGround(x, z, { water: 1, slope: 0.35 }) || nearFly(x, z, 7)) continue;
+  fallenLog(geo, x, z, rr() * TAU, rr.r(10, 22), rr.r(0.45, 1.0), rr);
+}
+fallenLog(geo, -9, -45, 0.35, 16, 0.75, rr); // a log over the stream north of the clearing
+// mushrooms at tree bases
+for (const t of TREES) if (rr() < 0.25 && t[3] > 0) { const a = rr() * TAU; mushrooms(geo.at(t[0], t[1]), [t[0] + cos(a) * (t[2] - 0.2), gy(t[0], t[1]) + 0.05, t[1] + sin(a) * (t[2] - 0.2)], rr); }
+stamp('logs');
+// forest floor: ferns, broad-leaved herbs, seedlings, flowers, wild bananas
+{
+  const r2 = RNG(99);
+  for (let gz = -248; gz < 248; gz += 1.7) for (let gx = -248; gx < 248; gx += 1.7) {
+    const x = gx + r2() * 1.7, z = gz + r2() * 1.7;
+    const dens = 0.7 + 0.35 * vn2(x * 0.05, z * 0.05);
+    if (r2() > dens || !okGround(x, z, { water: 0.4, slope: 0.62, rav: -2, shrine: 4.5 })) continue;
+    const dc = hypot(x - CLEAR.x, z - CLEAR.z); if (dc < CLEAR.r * 0.55 && r2() < 0.8) continue;
+    if (nearFly(x, z, 1.2) && r2() < 0.7) continue;
+    fernPlant([x, gy(x, z) - 0.05, z], r2, 0.8 + r2() * 0.6);
+  }
+  stamp('ferns');
+  for (let gz = -248; gz < 248; gz += 2.6) for (let gx = -248; gx < 248; gx += 2.6) {
+    const x = gx + r2() * 2.6, z = gz + r2() * 2.6;
+    const wet = sstep(10, 1, waterDist(x, z));
+    if (r2() > 0.32 + wet * 0.4 || !okGround(x, z, { water: 0.4, slope: 0.55, shrine: 4.5 })) continue;
+    if (nearFly(x, z, 1.5) && r2() < 0.6) continue;
+    broadPlant([x, gy(x, z) - 0.05, z], r2, r2() < 0.45 + wet * 0.3 ? 1 : 0, 0.7 + r2() * 0.8);
+  }
+  stamp('broad');
+  for (let gz = -248; gz < 248; gz += 3.4) for (let gx = -248; gx < 248; gx += 3.4) {
+    const x = gx + r2() * 3.4, z = gz + r2() * 3.4;
+    const dens = 0.45 + 0.4 * vn2(x * 0.03 + 9, z * 0.03 - 4);
+    if (r2() > dens || !okGround(x, z, { water: 1.2, slope: 0.6, shrine: 6 }) || hypot(x - CLEAR.x, z - CLEAR.z) < CLEAR.r * 0.8) continue;
+    if (nearFly(x, z, 2.2)) continue;
+    shrub([x, gy(x, z), z], r2, 0.8 + r2() * 0.6);
+  }
+  stamp('shrubs');
+  for (let gz = -246; gz < 246; gz += 1.0) for (let gx = -246; gx < 246; gx += 1.0) {
+    const x = gx + r2(), z = gz + r2();
+    if (r2() > 0.8 || !okGround(x, z, { water: 0.2, slope: 0.7, rav: -6, shrine: 3.6 })) continue;
+    const c = r2() < 0.15 ? [0.32, 0.42, 0.1] : r2() < 0.5 ? [0.16, 0.34, 0.07] : [0.12, 0.27, 0.06];
+    herbs([x, gy(x, z) - 0.03, z], r2, c);
+  }
+  stamp('herbs');
+  // flowers where light reaches: the clearing, stream banks, canopy gaps
+  const FL = [[0.95, 0.3, 0.55, 0], [0.98, 0.92, 0.85, 0], [0.7, 0.3, 0.9, 0], [0.95, 0.45, 0.1, 1], [0.9, 0.12, 0.15, 1], [1.0, 0.8, 0.2, 0]];
+  for (let i = 0; i < 1000; i++) {
+    let x, z;
+    const m = r2();
+    if (m < 0.3) { const a = r2() * TAU, d = sqrt(r2()) * (CLEAR.r + 4); x = CLEAR.x + cos(a) * d; z = CLEAR.z + sin(a) * d; }
+    else if (m < 0.65) { const s = STREAM[r2.i(STREAM.length)], a = r2() * TAU, d = sInfo(s[0], s[1], 2) + 1 + r2() * 4; x = s[0] + cos(a) * d; z = s[1] + sin(a) * d; }
+    else { const g = GAPS[r2.i(GAPS.length)], a = r2() * TAU, d = sqrt(r2()) * g[2]; x = g[0] + cos(a) * d; z = g[1] + sin(a) * d; }
+    if (!okGround(x, z, { water: 0.5, slope: 0.5, shrine: 4 })) continue;
+    flowers([x, gy(x, z), z], r2, FL[r2.i(FL.length)], 1 + r2.i(4));
+  }
+  for (let i = 0; i < 0; i++) {
+    let x, z;
+    if (r2() < 0.5) { const s = STREAM[r2.i(STREAM.length)], a = r2() * TAU, d = sInfo(s[0], s[1], 2) + 2 + r2() * 6; x = s[0] + cos(a) * d; z = s[1] + sin(a) * d; }
+    else { const g = r2() < 0.3 ? [CLEAR.x, CLEAR.z, CLEAR.r + 5] : GAPS[r2.i(GAPS.length)], a = r2() * TAU, d = (0.6 + 0.5 * r2()) * g[2]; x = g[0] + cos(a) * d; z = g[1] + sin(a) * d; }
+    if (!okGround(x, z, { water: 1.2, slope: 0.4, shrine: 6 }) || nearFly(x, z, 2) || !trunkFree(x, z, 1)) continue;
+    banana(geo, x, z, r2);
+  }
+  stamp('flowers, bananas');
+}
+// water
+{
+  const hw = (i) => sInfo(STREAM[i][0], STREAM[i][1], 2);
+  waterRibbon(STREAM, SLEV, hw, { pools: POOLS });
+  // pools: round discs at the local water level, under the banks
+  for (const [px, pz, pr] of POOLS) {
+    const lv = SLEV[nearPoly(STREAM, px, pz)[1]];
+    stamp(`pool ${px},${pz}: water ${lv.toFixed(2)} ground ${gy(px, pz).toFixed(2)} edge ${gy(px + pr, pz).toFixed(2)} ${gy(px - pr, pz).toFixed(2)} ${gy(px, pz + pr).toFixed(2)} ${gy(px, pz - pr).toFixed(2)}`);
+    const c = wv(px, lv - 0.01, pz, 0.05, 0.05, 0, 0), n = 40, R = pr + 1.5;
+    for (let k = 0; k < n; k++) { const a0 = (k / n) * TAU, a1 = ((k + 1) / n) * TAU; const v0 = wv(px + cos(a0) * R, lv - 0.01, pz + sin(a0) * R, 0.05, 0.05, 0, 0), v1 = wv(px + cos(a1) * R, lv - 0.01, pz + sin(a1) * R, 0.05, 0.05, 0, 0); WIDX.need(3); WIDX.a.set([c, v1, v0], WIDX.n); WIDX.n += 3; }
+  }
+  // the stream falls over the ravine rim at its end
+  const e = STREAM[STREAM.length - 1], e0 = STREAM[STREAM.length - 3], d = vnorm([e[0] - e0[0], 0, e[1] - e0[1]]);
+  waterfall([e[0] + d[0] * 0.3, SLEV[STREAM.length - 1] + 0.02, e[1] + d[2] * 0.3], RAV_FLOOR - 0.4, d, 2.6, 4.5);
+  // ravine floor stream: levels follow the floor, always falling eastward
+  const RL = new Float32Array(RAVINE.length); let lv = 1e9;
+  for (let i = 0; i < RAVINE.length; i++) { const [x, z] = RAVINE[i]; lv = min(lv - 0.01, gy(x, z) + 0.25); RL[i] = lv; }
+  waterRibbon(RAVINE, RL, () => 2.2, { speed: 0.5 });
+  // the main fall from the ridge face into the pool
+  const lip = [FALL_MAIN.x, 0, FALL_MAIN.z], pool = POOLS[0];
+  const dirF = vnorm([pool[0] - lip[0], 0, pool[1] - lip[2]]);
+  let ly = SLEV[0] + 18;
+  waterfall([lip[0], ly, lip[2]], SLEV[0] - 0.2, dirF, 3.2, 8.5);
+  FLY_CLEAR.push(lip);
+}
+stamp('water');
+
+// ---------------------------------------------------------------- creatures, particles (storage data)
+const FX = new Float32Array(4096 * 4);
+for (let i = 0; i < min(FALLS.length, 8); i++) FX.set(FALLS[FALLS.length - 1 - i], (64 + i) * 4);
+// bird perches sorted spatially so a territory is a run of nearby perches
+PERCH.sort((a, b) => (floor((a[2] + 260) / 40) * 20 + floor((a[0] + 260) / 40)) - (floor((b[2] + 260) / 40) * 20 + floor((b[0] + 260) / 40)));
+const nP = min(PERCH.length, 512);
+// keep the perches near the action (camera path), spread over the map
+const perchSel = []; { const step = max(1, floor(PERCH.length / 512)); for (let i = 0; i < PERCH.length && perchSel.length < 512; i += step) perchSel.push(PERCH[i]); }
+perchSel.forEach((p, i) => FX.set([p[0], p[1], p[2], 0], (1024 + i) * 4));
+const HORN = [[-60, 34, -142, 70], [10, 48, -150, 60], [-17, 45, -38, 35], [75, 52, 100, 45], [-100, 46, -120, 60], [60, 50, -140, 70]];
+HORN.forEach((h, i) => FX.set(h, (1600 + i) * 4));
+const BFLY = []; for (let i = 0; i < 64; i++) { const m = i % 3; let x, z; if (m === 0) { x = CLEAR.x + rr.n() * 10; z = CLEAR.z + rr.n() * 10; } else if (m === 1) { const s = STREAM[rr.i(STREAM.length)]; x = s[0] + rr.n() * 4; z = s[1] + rr.n() * 4; } else { const g = GAPS[rr.i(GAPS.length)]; x = g[0] + rr.n() * 5; z = g[1] + rr.n() * 5; } BFLY.push([x, gy(x, z) + 0.3, z, 0]); }
+BFLY.forEach((b, i) => FX.set(b, (1700 + i) * 4));
+for (let i = 0; i < 64; i++) { const s = STREAM[(i * 7) % STREAM.length]; FX.set([s[0], SLEV[(i * 7) % STREAM.length], s[1], 0], (1800 + i) * 4); }
+let nFF = 0;
+for (let i = 0; i < 4000 && nFF < 1500; i++) {
+  const x = rr.r(-200, 200), z = rr.r(-200, 200); const vis = 1;
+  if (!okGround(x, z, { water: 0, slope: 0.6 })) continue;
+  if (rr() > 0.3 + 0.7 * sstep(12, 0, waterDist(x, z))) continue;
+  FX.set([x, gy(x, z) + rr.r(0.4, 2.5), z, rr() * 100], (2048 + nFF++) * 4);
+}
+const NB_BIRD = 70, NB_HORN = HORN.length, NB_BFLY = 260, NB_DRAG = 48, NMOTE = 24000, NFALL = 900, NSPRAY = 1600;
+const meshB = meshOut(birdMesh()), meshBf = meshOut(butterflyMesh()), meshDf = meshOut(dragonflyMesh());
+
+// ---------------------------------------------------------------- world map texture: ground, canopy depth, canopy height, water
+const MAPN = 512;
+const MAP = new Float16Array(MAPN * MAPN * 4);
+{
+  const tau = new Float32Array(MAPN * MAPN), hs = new Float32Array(MAPN * MAPN), ws = new Float32Array(MAPN * MAPN), cs = (WH * 2) / MAPN;
+  for (const [x, y, z, r] of CLUMPS) {
+    const R = r * 1.05, i0 = floor((x - R + WH) / cs), i1 = ceil((x + R + WH) / cs), j0 = floor((z - R + WH) / cs), j1 = ceil((z + R + WH) / cs);
+    for (let j = max(j0, 0); j <= min(j1, MAPN - 1); j++) for (let i = max(i0, 0); i <= min(i1, MAPN - 1); i++) {
+      const px = (i + 0.5) * cs - WH, pz = (j + 0.5) * cs - WH, d = hypot(px - x, pz - z) / R;
+      if (d >= 1) continue;
+      const w = (1 - d * d) * 1.5; tau[i + j * MAPN] += w; hs[i + j * MAPN] += y * w; ws[i + j * MAPN] += w;
+    }
+  }
+  const blur = (A) => { const B = new Float32Array(A.length); for (let p = 0; p < 2; p++) { for (let j = 0; j < MAPN; j++) for (let i = 0; i < MAPN; i++) { let s = 0; for (let k = -3; k <= 3; k++) s += A[clamp(i + k, 0, MAPN - 1) + j * MAPN]; B[i + j * MAPN] = s / 7; } for (let j = 0; j < MAPN; j++) for (let i = 0; i < MAPN; i++) { let s = 0; for (let k = -3; k <= 3; k++) s += B[i + clamp(j + k, 0, MAPN - 1) * MAPN]; A[i + j * MAPN] = s / 7; } } };
+  blur(tau); blur(hs); blur(ws);
+  for (let j = 0; j < MAPN; j++) for (let i = 0; i < MAPN; i++) {
+    const k = i + j * MAPN, x = (i + 0.5) * cs - WH, z = (j + 0.5) * cs - WH;
+    MAP[k * 4] = min(gy(x, z), gAt(GH, x, z) + 1); MAP[k * 4 + 1] = min(tau[k], 6); MAP[k * 4 + 2] = ws[k] > 0.05 ? hs[k] / ws[k] : gy(x, z) + 25; MAP[k * 4 + 3] = sstep(8, 0, waterDist(x, z));
+  }
+}
+const canopyAt = (x, z) => { const i = clamp(floor((x + WH) / (WH * 2) * MAPN), 0, MAPN - 1), j = clamp(floor((z + WH) / (WH * 2) * MAPN), 0, MAPN - 1); return MAP[(i + j * MAPN) * 4 + 1]; };
+stamp('map');
+await say('Weaving the canopy…');
+const FOL = buildClusters();
+stamp('clusters: ' + FOL.map((f) => f.n * 64).join(', ') + ' leaf slots');
+
+// ---------------------------------------------------------------- GPU resources
+// static geometry: one vertex buffer, indices grouped by cell
+const NCH = NCELL * NCELL, CH = new Float32Array(NCH * 4), CHI = new Uint32Array(NCH * 2);
+let nIdx = 0; for (const g of geo.idx) nIdx += g.n;
+let IDX = new Uint32Array(nIdx), VV = geo.f.view();
+{
+  let o = 0;
+  for (let c = 0; c < NCH; c++) {
+    const g = geo.idx[c]; IDX.set(g.view(), o); CHI[c * 2] = o; CHI[c * 2 + 1] = g.n; o += g.n;
+    let mny = 1e9, mxy = -1e9; for (let i = 0; i < g.n; i += 3) { const y = VV[g.a[i] * 6 + 1]; if (y < mny) mny = y; if (y > mxy) mxy = y; }
+    const cx = (c % NCELL + 0.5) * CELL - WH, cz = (floor(c / NCELL) + 0.5) * CELL - WH;
+    // a cell's geometry can overhang its square by a crown radius
+    CH[c * 4] = cx; CH[c * 4 + 1] = (mny + mxy) / 2; CH[c * 4 + 2] = cz; CH[c * 4 + 3] = hypot(CELL * 0.5 + 16, CELL * 0.5 + 16, (mxy - mny) / 2);
+    geo.idx[c] = null;
+  }
+}
+const vbStatic = buf(VV, BU.VERTEX), ibStatic = buf(IDX, BU.INDEX);
+stamp(`static: ${(VV.length / 6 / 1e6).toFixed(2)}M verts, ${(nIdx / 3 / 1e6).toFixed(2)}M tris`);
+geo.f = null;
+const vbWater = buf(WATER.view(), BU.VERTEX), ibWater = buf(WIDX.view(), BU.INDEX), nWI = WIDX.n;
+const vbBird = buf(meshB.v, BU.VERTEX), ibBird = buf(meshB.i, BU.INDEX), vbBf = buf(meshBf.v, BU.VERTEX), ibBf = buf(meshBf.i, BU.INDEX), vbDf = buf(meshDf.v, BU.VERTEX), ibDf = buf(meshDf.i, BU.INDEX);
+const sbFX = buf(FX, BU.STORAGE);
+// foliage
+let NCL = 0; const KRNG = [];
+for (let k = 0; k < NKIND; k++) { KRNG.push([NCL, NCL * 64, FOL[k].n * 64]); NCL += FOL[k].n; }
+const CLD = new Float32Array(NCL * 4); FOL.forEach((f, k) => CLD.set(f.cl, KRNG[k][0] * 4));
+const sbClusters = buf(CLD, BU.STORAGE), sbVis = device.createBuffer({ size: NCL * 64 * 4 + 16, usage: BU.STORAGE });
+const sbInst = FOL.map((f) => buf(f.inst, BU.STORAGE));
+// the GPU has its copies: drop the generator's working memory so the JS heap stays small (no long GC pauses later)
+IDX = VV = null; for (const f of FOL) f.inst = f.cl = null; SN.P = SN.N = SN.Q = null; WATER.a = WIDX.a = null;
+//            maxDist lodDist DFULL DMIN rowsNear
+const KPRM = [[330, 38, 48, 0.3, 3], [170, 32, 34, 0.42, 5], [150, 34, 36, 0.42, 6], [62, 14, 13, 0.2, 2], [55, 12, 12, 0.3, 1]];
+const FROWS = [1, 2, 2, 1, 1];
+// indexed-indirect args (5 words each); leaf cards share one index buffer of ROWS x 2 quads over a (ROWS+1) x 3 vertex grid
+const ARGS = new Uint32Array(NKIND * 2 * 5);
+for (let k = 0; k < NKIND; k++) { ARGS[k * 10] = 12 * KPRM[k][4]; ARGS[k * 10 + 5] = 12 * FROWS[k]; }
+const LIX = new Uint16Array(12 * 8);
+for (let r = 0, o = 0; r < 8; r++) for (let h = 0; h < 2; h++) { const a = r * 3 + h; LIX.set([a, a + 1, a + 4, a, a + 4, a + 3], o); o += 6; }
+const ibLeaf = buf(LIX, BU.INDEX);
+const bArgs = device.createBuffer({ size: ARGS.byteLength, usage: BU.INDIRECT | BU.STORAGE | BU.COPY_DST | BU.COPY_SRC });
+const CUB = new ArrayBuffer(384), CUF = new Float32Array(CUB), CUU = new Uint32Array(CUB);
+CUU[28] = NCL; CUU[29] = NKIND;
+for (let k = 0; k < NKIND; k++) { CUF[32 + k * 4] = KPRM[k][0]; CUF[32 + k * 4 + 1] = KPRM[k][1]; CUF[32 + k * 4 + 2] = KPRM[k][2]; CUF[32 + k * 4 + 3] = KPRM[k][3]; CUU[64 + k * 4] = KRNG[k][0]; CUU[64 + k * 4 + 1] = KRNG[k][1]; CUU[64 + k * 4 + 2] = KRNG[k][2]; }
+const ubCull = device.createBuffer({ size: 384, usage: BU.UNIFORM | BU.COPY_DST });
+
+// shared bindings
+const sRep = device.createSampler({ addressModeU: 'repeat', addressModeV: 'repeat', addressModeW: 'repeat', magFilter: 'linear', minFilter: 'linear' });
+const sClamp = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+const sCmp = device.createSampler({ compare: 'less', magFilter: 'linear', minFilter: 'linear' });
+const tShadow = tex(SHADOW, SHADOW, 'depth16unorm', TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING);
+const tNoise = tex(128, 128, 'rgba8unorm', TU.STORAGE_BINDING | TU.TEXTURE_BINDING, { d: 128 });
+const tMap = tex(MAPN, MAPN, 'rgba16float', TU.TEXTURE_BINDING | TU.COPY_DST);
+Q.writeTexture({ texture: tMap }, MAP, { bytesPerRow: MAPN * 8 }, [MAPN, MAPN]);
+const UB = new Float32Array(96), UBS = new Float32Array(96);
+const ubo = device.createBuffer({ size: 384, usage: BU.UNIFORM | BU.COPY_DST }), uboS = device.createBuffer({ size: 384, usage: BU.UNIFORM | BU.COPY_DST });
+const bgl0 = device.createBindGroupLayout({ entries: [
+  { binding: 0, visibility: VF, buffer: {} }, { binding: 1, visibility: VF, sampler: {} }, { binding: 2, visibility: VF, sampler: {} },
+  { binding: 3, visibility: VF, sampler: { type: 'comparison' } }, { binding: 4, visibility: VF, texture: { sampleType: 'depth' } },
+  { binding: 5, visibility: VF, texture: { viewDimension: '3d' } }, { binding: 6, visibility: VF, texture: {} }] });
+const tDummy = tex(1, 1, 'depth16unorm', TU.TEXTURE_BINDING | TU.RENDER_ATTACHMENT);
+const mkBG0 = (u, sh) => device.createBindGroup({ layout: bgl0, entries: [{ binding: 0, resource: { buffer: u } }, { binding: 1, resource: sRep }, { binding: 2, resource: sClamp }, { binding: 3, resource: sCmp }, { binding: 4, resource: sh.createView() }, { binding: 5, resource: tNoise.createView() }, { binding: 6, resource: tMap.createView() }] });
+const bg0 = mkBG0(ubo, tShadow), bg0s = mkBG0(uboS, tDummy);
+const L1 = (entries) => device.createBindGroupLayout({ entries });
+const bglLeaf = L1([{ binding: 0, visibility: SS.VERTEX, buffer: { type: 'read-only-storage' } }, { binding: 1, visibility: SS.VERTEX, buffer: { type: 'read-only-storage' } }]);
+const bglFx = L1([{ binding: 0, visibility: SS.VERTEX, buffer: { type: 'read-only-storage' } }]);
+const bglWater = L1([{ binding: 0, visibility: SS.FRAGMENT, texture: {} }, { binding: 1, visibility: SS.FRAGMENT, texture: { sampleType: 'depth', multisampled: true } }]);
+const bglFog = L1([{ binding: 0, visibility: SS.FRAGMENT, texture: { sampleType: 'depth', multisampled: true } }]);
+const bglPost = L1([{ binding: 0, visibility: SS.FRAGMENT, texture: {} }, { binding: 1, visibility: SS.FRAGMENT, texture: {} }, { binding: 2, visibility: SS.FRAGMENT, texture: { sampleType: 'unfilterable-float' } }, { binding: 3, visibility: SS.FRAGMENT, texture: {} }, { binding: 4, visibility: SS.FRAGMENT, texture: { sampleType: 'depth', multisampled: true } }]);
+const bglBlur = L1([{ binding: 0, visibility: SS.FRAGMENT, texture: { sampleType: 'unfilterable-float' } }, { binding: 1, visibility: SS.FRAGMENT, texture: { sampleType: 'unfilterable-float' } }]);
+const bglBloom = L1([{ binding: 0, visibility: SS.FRAGMENT, texture: {} }, { binding: 1, visibility: SS.FRAGMENT, sampler: {} }]);
+const PL = (...g) => device.createPipelineLayout({ bindGroupLayouts: g });
+const pl0 = PL(bgl0), plLeaf = PL(bgl0, bglLeaf), plFx = PL(bgl0, bglFx), plWater = PL(bgl0, bglWater), plFog = PL(bgl0, bglFog), plPost = PL(bgl0, bglPost), plBlur = PL(bglBlur), plBloom = PL(bglBloom);
+const bgLeaf = sbInst.map((b) => device.createBindGroup({ layout: bglLeaf, entries: [{ binding: 0, resource: { buffer: b } }, { binding: 1, resource: { buffer: sbVis } }] }));
+const bgFx = device.createBindGroup({ layout: bglFx, entries: [{ binding: 0, resource: { buffer: sbFX } }] });
+
+// pipelines
+await say('Compiling shaders…');
+const mSolid = mod(W_SOLID, 'solid'), mLeaf = mod(W_LEAF, 'leaf'), mSky = mod(W_SKY, 'sky'), mWater = mod(W_WATER, 'water'), mFx = mod(W_FX, 'fx');
+const mFog = mod(W_FOG, 'fog'), mBlur = mod(W_BLUR, 'blur'), mBloom = mod(W_BLOOM, 'bloom'), mPost = mod(W_POST, 'post'), mCull = mod(W_CULL, 'cull'), mNoise = mod(W_NOISE, 'noise');
+const A = (shaderLocation, offset, format) => ({ shaderLocation, offset, format });
+const vbS = { arrayStride: 24, attributes: [A(0, 0, 'float32x3'), A(1, 12, 'snorm8x4'), A(2, 16, 'unorm8x4'), A(3, 20, 'unorm8x4')] };
+const vbW = { arrayStride: 28, attributes: [A(0, 0, 'float32x3'), A(1, 12, 'float32x4')] };
+const ADD = { color: { srcFactor: 'one', dstFactor: 'one' }, alpha: { srcFactor: 'one', dstFactor: 'one' } };
+const DS = (write, cmp = 'greater') => ({ format: DEPTH, depthWriteEnabled: write, depthCompare: cmp });
+const P = (o) => device.createRenderPipelineAsync(o);
+const scene = (layout, m, vs, fs, buffers, o = {}) => P({ layout, vertex: { module: m, entryPoint: vs, buffers, constants: o.c },
+  fragment: { module: m, entryPoint: fs, constants: o.c, targets: [{ format: HDR, blend: o.blend, writeMask: o.mask ?? GPUColorWrite.ALL }] },
+  primitive: { topology: o.topo || 'triangle-list', cullMode: o.cull || 'none' }, depthStencil: DS(!o.blend && !o.noz, o.cmp), multisample: { count: AA, alphaToCoverageEnabled: !!o.a2c } });
+const shadowP = (layout, m, vs, fs, buffers, c) => P({ layout, vertex: { module: m, entryPoint: vs, buffers, constants: c }, fragment: fs ? { module: m, entryPoint: fs, constants: c, targets: [] } : undefined,
+  primitive: { topology: 'triangle-list', cullMode: 'none' }, depthStencil: { format: 'depth16unorm', depthWriteEnabled: true, depthCompare: 'less', depthBias: 3, depthBiasSlopeScale: 2.5 } });
+const leafC = (k, lod) => ({ KIND: k, ROWS: lod ? FROWS[k] : KPRM[k][4], VBASE: KRNG[k][1] + lod * (KRNG[k][2] - 1), VREV: lod, DFULL: KPRM[k][2], DMIN: KPRM[k][3], DMAX: KPRM[k][0] });
+const pend = {
+  solid: scene(pl0, mSolid, 'vs', 'fs', [vbS], { cull: 'back', c: QS.has('cheap') ? { CHEAP: 1 } : undefined }),
+  solidSh: P({ layout: pl0, vertex: { module: mSolid, entryPoint: 'vs', buffers: [vbS], constants: { SHADOW: 1 } }, primitive: { cullMode: 'none' }, depthStencil: { format: 'depth16unorm', depthWriteEnabled: true, depthCompare: 'less', depthBias: 3, depthBiasSlopeScale: 2.5 } }),
+  sky: scene(pl0, mSky, 'vs', 'fs', [], { noz: true, cmp: 'equal' }),
+  water: P({ layout: plWater, vertex: { module: mWater, entryPoint: 'vs', buffers: [vbW] }, fragment: { module: mWater, entryPoint: 'fs', targets: [{ format: HDR }] }, primitive: { cullMode: 'none' }, depthStencil: DS(false), multisample: { count: AA, alphaToCoverageEnabled: true } }),
+  mote: scene(plFx, mFx, 'vsMote', 'fsGlow', [], { blend: ADD, topo: 'triangle-strip' }),
+  fly: scene(plFx, mFx, 'vsFly', 'fsGlow', [], { blend: ADD, topo: 'triangle-strip' }),
+  spray: scene(plFx, mFx, 'vsSpray', 'fsSoft', [], { blend: ADD, topo: 'triangle-strip' }),
+  fall: scene(plFx, mFx, 'vsFall', 'fsFall', [], { topo: 'triangle-strip', a2c: true }),
+  bird: scene(plFx, mFx, 'vsBird', 'fsBird', [vbS], { c: { CREATURE: 0, FXBASE: 1024, NPER: 12 } }),
+  horn: scene(plFx, mFx, 'vsBird', 'fsBird', [vbS], { c: { CREATURE: 1, FXBASE: 1600 } }),
+  bfly: scene(plFx, mFx, 'vsBird', 'fsBird', [vbS], { c: { CREATURE: 2, FXBASE: 1700 } }),
+  drag: scene(plFx, mFx, 'vsBird', 'fsBird', [vbS], { c: { CREATURE: 3, FXBASE: 1800 } }),
+  fog: P({ layout: plFog, vertex: { module: mFog, entryPoint: 'vs' }, fragment: { module: mFog, entryPoint: 'fs', targets: [{ format: HDR }, { format: 'r32float' }] } }),
+  blurH: P({ layout: plBlur, vertex: { module: mBlur, entryPoint: 'vs' }, fragment: { module: mBlur, entryPoint: 'fs', constants: { DX: 1, DY: 0 }, targets: [{ format: HDR }, { format: 'r32float' }] } }),
+  blurV: P({ layout: plBlur, vertex: { module: mBlur, entryPoint: 'vs' }, fragment: { module: mBlur, entryPoint: 'fs', constants: { DX: 0, DY: 1 }, targets: [{ format: HDR }, { format: 'r32float' }] } }),
+  down0: P({ layout: plBloom, vertex: { module: mBloom, entryPoint: 'vs' }, fragment: { module: mBloom, entryPoint: 'fsDown0', targets: [{ format: HDR }] } }),
+  down: P({ layout: plBloom, vertex: { module: mBloom, entryPoint: 'vs' }, fragment: { module: mBloom, entryPoint: 'fsDown', targets: [{ format: HDR }] } }),
+  up: P({ layout: plBloom, vertex: { module: mBloom, entryPoint: 'vs' }, fragment: { module: mBloom, entryPoint: 'fsUp', targets: [{ format: HDR, blend: ADD }] } }),
+  post: P({ layout: plPost, vertex: { module: mPost, entryPoint: 'vs' }, fragment: { module: mPost, entryPoint: 'fs', targets: [{ format: FMT }] } }),
+};
+const pLeaf = [], pLeafSh = [];
+for (let k = 0; k < NKIND; k++) {
+  pLeaf.push([0, 1].map((lod) => scene(plLeaf, mLeaf, 'vs', 'fs', [], { c: leafC(k, lod), a2c: true })));
+  pLeafSh.push(shadowP(plLeaf, mLeaf, 'vs', 'fsShadow', [], { ...leafC(k, 1), SHADOW: 1 }));
+}
+const PP = {}; for (const k in pend) PP[k] = await pend[k];
+for (let k = 0; k < NKIND; k++) { pLeaf[k] = await Promise.all(pLeaf[k]); pLeafSh[k] = await pLeafSh[k]; }
+const pCull = device.createComputePipeline({ layout: 'auto', compute: { module: mCull, entryPoint: 'main' } });
+const bgCull = device.createBindGroup({ layout: pCull.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubCull } }, { binding: 1, resource: { buffer: sbClusters } }, { binding: 2, resource: { buffer: sbVis } }, { binding: 3, resource: { buffer: bArgs } }] });
+stamp('pipelines');
+
+// ---------------------------------------------------------------- sun matrix, one-time bakes (noise, shadow map)
+{
+  const L = SUN, lr = vnorm(vcross([0, 1, 0], L)), lu = vcross(L, lr);
+  let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9, z0 = 1e9, z1 = -1e9;
+  for (const cx of [-238, 238]) for (const cy of [-36, 105]) for (const cz of [-238, 238]) { const p = [cx, cy, cz]; const a = vdot(p, lr), b = vdot(p, lu), c = vdot(p, L); x0 = min(x0, a); x1 = max(x1, a); y0 = min(y0, b); y1 = max(y1, b); z0 = min(z0, c); z1 = max(z1, c); }
+  const hx = (x1 - x0) / 2, hy = (y1 - y0) / 2, cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, zr = z1 - z0 + 10;
+  const m = UBS;
+  m[0] = lr[0] / hx; m[4] = lr[1] / hx; m[8] = lr[2] / hx; m[12] = -cx / hx;
+  m[1] = lu[0] / hy; m[5] = lu[1] / hy; m[9] = lu[2] / hy; m[13] = -cy / hy;
+  m[2] = -L[0] / zr; m[6] = -L[1] / zr; m[10] = -L[2] / zr; m[14] = (z1 + 5) / zr;
+  m[3] = 0; m[7] = 0; m[11] = 0; m[15] = 1;
+  for (let i = 0; i < 16; i++) UB[16 + i] = UBS[16 + i] = m[i];
+  UB[48] = UBS[48] = L[0]; UB[49] = UBS[49] = L[1]; UB[50] = UBS[50] = L[2];
+  UBS[56] = 1; UBS[35] = 0; UBS[32] = -L[0] * 1000; UBS[33] = 1000; UBS[34] = -L[2] * 1000;
+  Q.writeBuffer(uboS, 0, UBS);
+  stamp(`shadow texel ${(hx * 2 / SHADOW * 100).toFixed(1)} x ${(hy * 2 / SHADOW * 100).toFixed(1)} cm`);
+}
+{
+  const p = device.createComputePipeline({ layout: 'auto', compute: { module: mNoise, entryPoint: 'main' } });
+  const e = device.createCommandEncoder(), c = e.beginComputePass();
+  c.setPipeline(p); c.setBindGroup(0, device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: [{ binding: 0, resource: tNoise.createView() }] }));
+  c.dispatchWorkgroups(32, 32, 32); c.end();
+  const r = e.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: tShadow.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } });
+  r.setBindGroup(0, bg0s);
+  r.setPipeline(PP.solidSh); r.setVertexBuffer(0, vbStatic); r.setIndexBuffer(ibStatic, 'uint32'); r.drawIndexed(nIdx);
+  for (let k = 0; k < NKIND; k++) { if (k === 3 || k === 4) continue; r.setPipeline(pLeafSh[k]); r.setBindGroup(1, bgLeaf[k]); r.setIndexBuffer(ibLeaf, 'uint16'); r.drawIndexed(12 * FROWS[k], FOL[k].n * 64); }
+  r.end();
+  Q.submit([e.finish()]);
+  await Q.onSubmittedWorkDone();
+}
+stamp('bakes');
+const expoAt = (x, y, z) => 1 / (0.6 + 2.2 * exp(-canopyAt(x, z) * 0.5) * sstep(-5, 25, y - gy(x, z)) + 0.4 * exp(-canopyAt(x, z) * 0.5));
+const fogLumAt = (x, y, z) => 0.12 + 0.2 * exp(-canopyAt(x, z) * 0.6);
+
+// ---------------------------------------------------------------- render targets
+let W = 0, H = 0, targets = [], passMain, passWater, passFog, passBH, passBV, passPost, bgWaterT, bgFogT, bgBH, bgBV, bgPostT, bloomPass = [], bloomBG = [], tColor, tCopy;
+const NBL = 6;
+function resize() {
+  const w = max(2, round(canvas.clientWidth * devicePixelRatio * SCALE) & ~1), h = max(2, round(canvas.clientHeight * devicePixelRatio * SCALE) & ~1);
+  if (w === W && h === H) return;
+  W = w; H = h; canvas.width = W; canvas.height = H;
+  ctx.configure({ device, format: FMT, alphaMode: 'opaque' });
+  for (const t of targets) t.destroy();
+  const RA = TU.RENDER_ATTACHMENT, TB = TU.TEXTURE_BINDING;
+  const tMS = tex(W, H, HDR, RA, { s: AA }), tDep = tex(W, H, DEPTH, RA | TB, { s: AA });
+  tColor = tex(W, H, HDR, RA | TB | TU.COPY_SRC); tCopy = tex(W, H, HDR, TB | TU.COPY_DST);
+  const hw = W / 2, hh = H / 2;
+  const tF = tex(hw, hh, HDR, RA | TB), tFD = tex(hw, hh, 'r32float', RA | TB), tF2 = tex(hw, hh, HDR, RA | TB), tFD2 = tex(hw, hh, 'r32float', RA | TB);
+  targets = [tMS, tDep, tColor, tCopy, tF, tFD, tF2, tFD2];
+  const bl = []; for (let i = 0; i < NBL; i++) { const t = tex(max(1, W >> (i + 1)), max(1, H >> (i + 1)), HDR, RA | TB); bl.push(t); targets.push(t); }
+  const vMS = tMS.createView(), vDep = tDep.createView(), vCol = tColor.createView();
+  passMain = { colorAttachments: [{ view: vMS, resolveTarget: vCol, loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }], depthStencilAttachment: { view: vDep, depthClearValue: 0, depthLoadOp: 'clear', depthStoreOp: 'store' } };
+  passWater = { colorAttachments: [{ view: vMS, resolveTarget: vCol, loadOp: 'load', storeOp: 'discard' }], depthStencilAttachment: { view: vDep, depthReadOnly: true } };
+  const ca = (v) => ({ view: v, loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 0] });
+  passFog = { colorAttachments: [ca(tF.createView()), ca(tFD.createView())] };
+  passBH = { colorAttachments: [ca(tF2.createView()), ca(tFD2.createView())] };
+  passBV = { colorAttachments: [ca(tF.createView()), ca(tFD.createView())] };
+  passPost = { colorAttachments: [{ view: null, loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] };
+  bgWaterT = device.createBindGroup({ layout: bglWater, entries: [{ binding: 0, resource: tCopy.createView() }, { binding: 1, resource: vDep }] });
+  bgFogT = device.createBindGroup({ layout: bglFog, entries: [{ binding: 0, resource: vDep }] });
+  bgBH = device.createBindGroup({ layout: bglBlur, entries: [{ binding: 0, resource: tF.createView() }, { binding: 1, resource: tFD.createView() }] });
+  bgBV = device.createBindGroup({ layout: bglBlur, entries: [{ binding: 0, resource: tF2.createView() }, { binding: 1, resource: tFD2.createView() }] });
+  const vBl = bl.map((t) => t.createView());
+  bgPostT = device.createBindGroup({ layout: bglPost, entries: [{ binding: 0, resource: vCol }, { binding: 1, resource: tF.createView() }, { binding: 2, resource: tFD.createView() }, { binding: 3, resource: vBl[0] }, { binding: 4, resource: vDep }] });
+  bloomPass = []; bloomBG = [];
+  const bbg = (v) => device.createBindGroup({ layout: bglBloom, entries: [{ binding: 0, resource: v }, { binding: 1, resource: sClamp }] });
+  for (let i = 0; i < NBL; i++) { bloomPass.push({ colorAttachments: [ca(vBl[i])] }); bloomBG.push(bbg(i ? vBl[i - 1] : vCol)); }
+  for (let i = NBL - 1; i > 0; i--) { bloomPass.push({ colorAttachments: [{ view: vBl[i - 1], loadOp: 'load', storeOp: 'store' }] }); bloomBG.push(bbg(vBl[i])); }
+  UB[52] = W; UB[53] = H; UB[54] = 1 / W; UB[55] = 1 / H;
+}
+resize();
+addEventListener('resize', resize);
+
+// ---------------------------------------------------------------- GPU timing
+let qs, qRes, qRead = [], tsB, tsE;
+const F = new Float64Array(48);
+const CX = 0, CY = 1, CZ = 2, YAW = 3, PIT = 4, TIME = 5, GPU = 6, LAST = 7, VX = 8, VY = 9, VZ = 10, FLT = 11, SPL = 12, FOGL = 13, EXPO = 14, DT = 15, GPUN = 16, JST = 17, RAWDT = 18;
+// every frame writes its begin/end timestamps into a 256-frame ring; each half is resolved and read back in one go
+const QN = 256, GLOGN = 1 << 16, GLOG = new Float32Array(GLOGN), TSB = [], TSE = [];
+let GLN = 0;
+if (hasTS) {
+  qs = device.createQuerySet({ type: 'timestamp', count: QN * 2 });
+  qRes = device.createBuffer({ size: QN * 8, usage: BU.QUERY_RESOLVE | BU.COPY_SRC });
+  for (let k = 0; k < QN; k++) { TSB.push({ timestampWrites: { querySet: qs, beginningOfPassWriteIndex: k * 2 } }); TSE.push({ querySet: qs, endOfPassWriteIndex: k * 2 + 1 }); }
+  for (let i = 0; i < 2; i++) {
+    const b = device.createBuffer({ size: QN * 8, usage: BU.MAP_READ | BU.COPY_DST }), o = { b, busy: false, done: null };
+    o.done = () => {
+      const a = new BigInt64Array(b.getMappedRange());
+      for (let j = 0; j < QN / 2; j++) { const ms = Number(a[j * 2 + 1] - a[j * 2]) / 1e6; if (ms > 0 && ms < 1000) { GLOG[GLN++ & (GLOGN - 1)] = ms; F[GPU] = ms; } }
+      F[GPUN]++; b.unmap(); o.busy = false;
+    };
+    qRead.push(o);
+  }
+}
+
+// ---------------------------------------------------------------- camera
+const TANY = 0.62, NEAR = 0.08;
+const aimAt = (x, y, z, tx, ty, tz) => { F[CX] = x; F[CY] = y; F[CZ] = z; const dx = tx - x, dy = ty - y, dz = tz - z; F[YAW] = atan2(dx, -dz); F[PIT] = atan2(dy, hypot(dx, dz)); };
+const setPose = (i) => { const p = POSES[i]; aimAt(p[0], p[2], p[1], p[3], p[5], p[4]); F[VX] = F[VY] = F[VZ] = 0; };
+setPose(0);
+F[TIME] = 8; F[FOGL] = fogLumAt(F[CX], F[CY], F[CZ]); F[EXPO] = 1;
+// fly path: Catmull-Rom over position + target, arc-length parameterised
+const FLYN = FLY.length / 6, FLYT = 60, LUTN = 1024, flyLUT = new Float32Array(LUTN + 1), P6 = new Float64Array(6);
+function flyRaw(s) {
+  let i = floor(s) | 0; if (i > FLYN - 2) i = FLYN - 2; const u = s - i;
+  const i0 = (i > 0 ? i - 1 : 0) * 6, i1 = i * 6, i2 = (i + 1) * 6, i3 = (i + 2 < FLYN ? i + 2 : FLYN - 1) * 6;
+  for (let o = 0; o < 6; o++) { const a = FLY[i0 + o], b = FLY[i1 + o], c = FLY[i2 + o], d = FLY[i3 + o]; P6[o] = 0.5 * (2 * b + (c - a) * u + (2 * a - 5 * b + 4 * c - d) * u * u + (3 * b - a - 3 * c + d) * u * u * u); }
+}
+{
+  const M = 4096, len = new Float32Array(M + 1); let px = 0, py = 0, pz = 0;
+  for (let k = 0; k <= M; k++) { flyRaw((k / M) * (FLYN - 1)); if (k) len[k] = len[k - 1] + hypot(P6[0] - px, P6[1] - py, P6[2] - pz); px = P6[0]; py = P6[1]; pz = P6[2]; }
+  for (let k = 0, j = 0; k <= LUTN; k++) { const d = (k / LUTN) * len[M]; while (j < M - 1 && len[j + 1] < d) j++; flyLUT[k] = ((j + (d - len[j]) / max(len[j + 1] - len[j], 1e-6)) / M) * (FLYN - 1); }
+  stamp(`fly path ${len[M].toFixed(0)} m`);
+}
+// look target is smoothed separately so the view never snaps
+const LK = new Float64Array(3);
+function flyAt(t) {
+  let s = clamp(t / FLYT, 0, 1); s = s * s * (3 - 2 * s) * 0.2 + s * 0.8; s *= LUTN;
+  let k = floor(s) | 0; if (k > LUTN - 1) k = LUTN - 1;
+  flyRaw(flyLUT[k] + (flyLUT[k + 1] - flyLUT[k]) * (s - k));
+  aimAt(P6[0], P6[1], P6[2], P6[3], P6[4], P6[5]);
+}
+
+// ---------------------------------------------------------------- per-frame culling of the static cells
+const PLN = new Float64Array(24);
+function planes(cx, cy, cz, fx, fy, fz, rx, rz, ux, uy, uz, tx, ty) {
+  const set = (i, nx, ny, nz) => { const l = 1 / hypot(nx, ny, nz); nx *= l; ny *= l; nz *= l; PLN[i * 4] = nx; PLN[i * 4 + 1] = ny; PLN[i * 4 + 2] = nz; PLN[i * 4 + 3] = -(nx * cx + ny * cy + nz * cz); };
+  set(0, rx + fx * tx, fy * tx, rz + fz * tx); set(1, -rx + fx * tx, fy * tx, -rz + fz * tx);
+  set(2, ux + fx * ty, uy + fy * ty, uz + fz * ty); set(3, -ux + fx * ty, -uy + fy * ty, -uz + fz * ty);
+  set(4, fx, fy, fz); PLN[19] -= NEAR; set(5, -fx, -fy, -fz); PLN[23] += 360;
+}
+const VCI = new Uint16Array(NCH), VCD = new Float32Array(NCH);
+const visCell = (i) => { const x = CH[i * 4], y = CH[i * 4 + 1], z = CH[i * 4 + 2], r = CH[i * 4 + 3]; for (let p = 0; p < 6; p++) if (PLN[p * 4] * x + PLN[p * 4 + 1] * y + PLN[p * 4 + 2] * z + PLN[p * 4 + 3] < -r) return false; return true; };
+
+// ---------------------------------------------------------------- frame
+const submitList = [null];
+let hud = false, frameN = 0, SKIP = 0; const DS_ = +(QS.get('ds') || 1); // SKIP: profiling mask (1 solids, 2 leaves, 4 fx, 8 water, 16 fog, 32 blur+bloom)
+function render() {
+  const cx = F[CX], cy = F[CY], cz = F[CZ], pitch = F[PIT], yaw = F[YAW];
+  const cp = cos(pitch), fy = sin(pitch), rx = cos(yaw), rz = sin(yaw), fx = cp * rz, fz = -cp * rx;
+  const ux = -rz * fy, uy = rz * fx - rx * fz, uz = rx * fy;
+  const asp = W / H, tx = TANY * asp, sx = 1 / tx, sy = 1 / TANY, m = UB;
+  m[0] = rx * sx; m[4] = 0; m[8] = rz * sx; m[12] = -(rx * cx + rz * cz) * sx;
+  m[1] = ux * sy; m[5] = uy * sy; m[9] = uz * sy; m[13] = -(ux * cx + uy * cy + uz * cz) * sy;
+  m[2] = 0; m[6] = 0; m[10] = 0; m[14] = NEAR;
+  m[3] = fx; m[7] = fy; m[11] = fz; m[15] = -(fx * cx + fy * cy + fz * cz);
+  m[32] = cx; m[33] = cy; m[34] = cz; m[35] = F[TIME];
+  m[36] = rx; m[37] = 0; m[38] = rz; m[39] = tx;
+  m[40] = ux; m[41] = uy; m[42] = uz; m[43] = TANY;
+  m[44] = fx; m[45] = fy; m[46] = fz; m[47] = NEAR;
+  m[51] = 1.05 * F[EXPO];
+  m[56] = DS_; m[57] = frameN % 64; m[58] = F[FOGL]; m[59] = 0.6;
+  m[60] = -WH; m[61] = -WH; m[62] = 1 / (WH * 2);
+  m[88] = 0.007; m[89] = 4; m[92] = FALL_MAIN.x - 2; m[93] = SLEV[0] + 2; m[94] = FALL_MAIN.z - 2; m[95] = 6;
+  Q.writeBuffer(ubo, 0, UB);
+  planes(cx, cy, cz, fx, fy, fz, rx, rz, ux, uy, uz, tx * 1.02, TANY * 1.02);
+  for (let i = 0; i < 24; i++) CUF[i] = PLN[i];
+  CUF[24] = cx; CUF[25] = cy; CUF[26] = cz; CUF[27] = DS_;
+  Q.writeBuffer(ubCull, 0, CUB);
+  Q.writeBuffer(bArgs, 0, ARGS);
+
+  const e = device.createCommandEncoder();
+  const qk = frameN % QN;
+  const cpd = hasTS ? TSB[qk] : cullDesc;
+  const c = e.beginComputePass(cpd);
+  c.setPipeline(pCull); c.setBindGroup(0, bgCull); c.dispatchWorkgroups(ceil(NCL / 64)); c.end();
+  let r = e.beginRenderPass(passMain);
+  r.setBindGroup(0, bg0);
+  // static geometry, merged runs of visible cells
+  r.setPipeline(PP.solid); r.setVertexBuffer(0, vbStatic); r.setIndexBuffer(ibStatic, 'uint32');
+  // visible cells nearest first, so early depth testing rejects what they hide
+  let nv = 0;
+  if (!(SKIP & 1)) for (let i = 0; i < NCH; i++) if (CHI[i * 2 + 1] && visCell(i)) {
+    const dx = CH[i * 4] - cx, dz = CH[i * 4 + 2] - cz, d = dx * dx + dz * dz; let j = nv++;
+    while (j > 0 && VCD[j - 1] > d) { VCD[j] = VCD[j - 1]; VCI[j] = VCI[j - 1]; j--; }
+    VCD[j] = d; VCI[j] = i;
+  }
+  for (let j = 0; j < nv; j++) r.drawIndexed(CHI[VCI[j] * 2 + 1], 1, CHI[VCI[j] * 2]);
+  // foliage, GPU-culled
+  r.setIndexBuffer(ibLeaf, 'uint16');
+  if (!(SKIP & 2)) for (let k = 0; k < NKIND; k++) {
+    r.setBindGroup(1, bgLeaf[k]);
+    r.setPipeline(pLeaf[k][0]); r.drawIndexedIndirect(bArgs, (k * 2) * 20);
+    r.setPipeline(pLeaf[k][1]); r.drawIndexedIndirect(bArgs, (k * 2 + 1) * 20);
+  }
+  r.setBindGroup(1, bgFx);
+  if (!(SKIP & 4)) {
+  r.setPipeline(PP.fall); r.draw(4, NFALL);
+  r.setPipeline(PP.bird); r.setVertexBuffer(0, vbBird); r.setIndexBuffer(ibBird, 'uint32'); r.drawIndexed(meshB.i.length, NB_BIRD);
+  r.setPipeline(PP.horn); r.drawIndexed(meshB.i.length, NB_HORN);
+  r.setPipeline(PP.bfly); r.setVertexBuffer(0, vbBf); r.setIndexBuffer(ibBf, 'uint32'); r.drawIndexed(meshBf.i.length, NB_BFLY);
+  r.setPipeline(PP.drag); r.setVertexBuffer(0, vbDf); r.setIndexBuffer(ibDf, 'uint32'); r.drawIndexed(meshDf.i.length, NB_DRAG);
+  }
+  r.setPipeline(PP.sky); r.draw(3);
+  if (!(SKIP & 4)) {
+  r.setPipeline(PP.mote); r.draw(4, NMOTE);
+  r.setPipeline(PP.fly); r.draw(4, nFF);
+  r.setPipeline(PP.spray); r.draw(4, NSPRAY);
+  }
+  r.end();
+  e.copyTextureToTexture({ texture: tColor }, { texture: tCopy }, [W, H]);
+  r = e.beginRenderPass(passWater);
+  r.setBindGroup(0, bg0); r.setBindGroup(1, bgWaterT);
+  if (!(SKIP & 8)) { r.setPipeline(PP.water); r.setVertexBuffer(0, vbWater); r.setIndexBuffer(ibWater, 'uint32'); r.drawIndexed(nWI); }
+  r.end();
+  if (!(SKIP & 16)) { r = e.beginRenderPass(passFog); r.setPipeline(PP.fog); r.setBindGroup(0, bg0); r.setBindGroup(1, bgFogT); r.draw(3); r.end(); }
+  if (!(SKIP & 32)) {
+  r = e.beginRenderPass(passBH); r.setPipeline(PP.blurH); r.setBindGroup(0, bgBH); r.draw(3); r.end();
+  r = e.beginRenderPass(passBV); r.setPipeline(PP.blurV); r.setBindGroup(0, bgBV); r.draw(3); r.end();
+  for (let i = 0; i < bloomPass.length; i++) { r = e.beginRenderPass(bloomPass[i]); r.setPipeline(i === 0 ? PP.down0 : i < NBL ? PP.down : PP.up); r.setBindGroup(0, bloomBG[i]); r.draw(3); r.end(); }
+  }
+  passPost.colorAttachments[0].view = ctx.getCurrentTexture().createView();
+  passPost.timestampWrites = hasTS ? TSE[qk] : undefined;
+  r = e.beginRenderPass(passPost); r.setPipeline(PP.post); r.setBindGroup(0, bg0); r.setBindGroup(1, bgPostT); r.draw(3); r.end();
+  let slot = null;
+  if (hasTS && (qk === QN / 2 - 1 || qk === QN - 1)) {
+    slot = qRead[qk < QN / 2 ? 0 : 1];
+    if (slot.busy) slot = null;
+    else { const h = qk < QN / 2 ? 0 : QN; e.resolveQuerySet(qs, h, QN, qRes, 0); e.copyBufferToBuffer(qRes, 0, slot.b, 0, QN * 8); }
+  }
+  submitList[0] = e.finish();
+  Q.submit(submitList);
+  if (slot) { slot.busy = true; slot.b.mapAsync(GPUMapMode.READ).then(slot.done); }
+  frameN++;
+}
+const cullDesc = {};
+
+// ---------------------------------------------------------------- input and movement
+const KEY = new Uint8Array(256);
+const KC = { KeyW: 1, KeyS: 2, KeyA: 3, KeyD: 4, KeyE: 5, KeyQ: 6, ShiftLeft: 7, ShiftRight: 7 };
+let locked = false, flying = false, mdx = 0, mdy = 0;
+addEventListener('keydown', (e) => {
+  const k = KC[e.code]; if (k) KEY[k] = 1;
+  if (e.repeat) return;
+  if (/Digit[1-6]/.test(e.code)) { flying = false; setPose(+e.code[5] - 1); }
+  if (e.code === 'KeyH') { hud = !hud; info.textContent = ''; }
+});
+addEventListener('keyup', (e) => { const k = KC[e.code]; if (k) KEY[k] = 0; });
+addEventListener('blur', () => KEY.fill(0));
+$('o').addEventListener('click', () => canvas.requestPointerLock());
+document.addEventListener('pointerlockchange', () => { locked = document.pointerLockElement === canvas; body.classList.toggle('r', locked); if (!locked) $('s').textContent = 'Click to resume'; });
+addEventListener('mousemove', (e) => { if (locked) { mdx += e.movementX; mdy += e.movementY; } });
+function collide() {
+  // push the camera out of rock (signed density gradient), keep it inside the world
+  for (let k = 0; k < 3; k++) {
+    const x = F[CX], y = F[CY], z = F[CZ], d = dAt(x, y, z) + 0.6;
+    if (d <= 0) break;
+    const gx = dAt(x + 0.4, y, z) - dAt(x - 0.4, y, z), gy_ = dAt(x, y + 0.4, z) - dAt(x, y - 0.4, z), gz = dAt(x, y, z + 0.4) - dAt(x, y, z - 0.4);
+    const l = hypot(gx, gy_, gz) || 1;
+    F[CX] -= (gx / l) * d; F[CY] -= (gy_ / l) * d; F[CZ] -= (gz / l) * d;
+  }
+  F[CX] = clamp(F[CX], -212, 212); F[CZ] = clamp(F[CZ], -212, 212); F[CY] = clamp(F[CY], -40, 130);
+}
+function move(dt) {
+  F[YAW] += mdx * 0.0022; F[PIT] = clamp(F[PIT] - mdy * 0.0022, -1.55, 1.55); mdx = mdy = 0;
+  const sp = KEY[7] ? 22 : 5, cp = cos(F[PIT]);
+  const fx = cp * sin(F[YAW]), fy = sin(F[PIT]), fz = -cp * cos(F[YAW]), rx = cos(F[YAW]), rz = sin(F[YAW]);
+  const iw = KEY[1] - KEY[2], ia = KEY[4] - KEY[3], iu = KEY[5] - KEY[6];
+  const tx = (fx * iw + rx * ia) * sp, ty = (fy * iw + iu) * sp, tz = (fz * iw + rz * ia) * sp;
+  const k = 1 - exp(-dt * 6);
+  F[VX] += (tx - F[VX]) * k; F[VY] += (ty - F[VY]) * k; F[VZ] += (tz - F[VZ]) * k;
+  F[CX] += F[VX] * dt; F[CY] += F[VY] * dt; F[CZ] += F[VZ] * dt;
+  collide();
+}
+let hudT = 0, hudN = 0, hudG = 0, hudMax = 0;
+let paused = false, tick = null; // paused: the harness renders on demand; tick: the benchmark / harness hook (bench.js) can take over the camera
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (paused) return;
+  F[RAWDT] = F[LAST] ? now - F[LAST] : 16;
+  const dt = F[LAST] ? min((now - F[LAST]) / 1000, 0.1) : 0.016; F[LAST] = now; F[DT] = dt;
+  if (tick) tick(dt); else { F[TIME] += dt; move(dt); }
+  // fog brightness and exposure follow how open the canopy is around the camera
+  const ft = fogLumAt(F[CX], F[CY], F[CZ]); F[FOGL] += (ft - F[FOGL]) * min(dt * 1.5, 1);
+  F[EXPO] += (expoAt(F[CX], F[CY], F[CZ]) - F[EXPO]) * min(dt * 1.2, 1);
+  const j0 = performance.now();
+  render();
+  F[JST] = performance.now() - j0;
+  if (hud) {
+    hudN++; hudT += dt; hudG += F[GPU]; hudMax = max(hudMax, dt);
+    if (hudT > 0.5) { info.textContent = `${(hudN / hudT).toFixed(0)} fps  frame ${(hudT / hudN * 1000).toFixed(2)} ms (max ${(hudMax * 1000).toFixed(1)})  GPU ${(hudG / hudN).toFixed(2)} ms  ${W}x${H}`; hudN = 0; hudT = 0; hudG = 0; hudMax = 0; }
+  }
+}
+stamp('ready');
+
+// ============================================================================
+// fly-through (F), benchmark (B), and hooks for the capture harness
+// ============================================================================
+{
+  const LOGN = 1 << 15, logF = new Float32Array(LOGN), logG = new Float32Array(LOGN), logJ = new Float32Array(LOGN), logH = new Float32Array(LOGN);
+  let mode = 0, nF = 0, nG = 0, lastGpu = -1; // mode 1: fly, 2: benchmark
+  const stats = (a, n) => {
+    const s = Array.from(a.subarray(0, n)).sort((x, y) => x - y); let sum = 0; for (const v of s) sum += v;
+    return { n, avg: sum / n, p99: s[min(n - 1, floor(n * 0.99))], max: s[n - 1] };
+  };
+  const report = () => {
+    const f = stats(logF, nF), g = nG ? stats(logG, nG) : null, fm = (o) => `avg ${o.avg.toFixed(2)}  p99 ${o.p99.toFixed(2)}  max ${o.max.toFixed(2)} ms`;
+    const big = []; for (let i = 0; i < nF; i++) if (logF[i] > 25) big.push([i, +logF[i].toFixed(1), +logJ[i].toFixed(1), +(logH[i - 2] || 0).toFixed(1), +logH[i].toFixed(1)]);
+    let jm = 0, js = 0; for (let i = 0; i < nF; i++) { jm = max(jm, logJ[i]); js += logJ[i]; }
+    const r = { W, H, jsMax: jm, jsAvg: js / nF, big: big.filter((b) => b[1] > 50).slice(0, 20), frames: f, gpu: g, over16: Array.from(logF.subarray(0, nF)).filter((v) => v > 16.7).length, gpuOver16: g ? Array.from(logG.subarray(0, nG)).filter((v) => v > 16.7).length : 0 };
+    info.textContent = `Fly-through ${W}x${H}, ${f.n} frames\nframe ${fm(f)}\nGPU   ${g ? fm(g) : 'timestamp-query unavailable'}`;
+    window.__bench = r; console.log('BENCH ' + JSON.stringify(r));
+  };
+  const start = (m) => { mode = m; F[FLT] = 0; nF = nG = 0; lastGpu = GLN; tick = run; if (m === 2) { hud = false; info.textContent = ''; } };
+  const stop = () => { mode = 0; tick = null; };
+  const run = (dt) => {
+    F[FLT] += dt; F[TIME] += dt;
+    flyAt(F[FLT]);
+    if (mode === 2) {
+      if (nF < LOGN) { logH[nF] = F[RAWDT];
+        logJ[nF] = F[JST]; logF[nF++] = dt * 1000; }
+      
+    }
+    if (F[FLT] >= FLYT) { if (mode === 2) { setTimeout(() => { for (let i = lastGpu; i < GLN && nG < LOGN; i++) logG[nG++] = GLOG[i & (GLOGN - 1)]; report(); }, 600); } stop(); }
+  };
+  addEventListener('keydown', (e) => {
+    if (e.repeat) return;
+    if (e.code === 'KeyF' || e.code === 'KeyB') { if (mode) stop(); else start(e.code === 'KeyB' ? 2 : 1); }
+    else if (/Digit[1-6]/.test(e.code)) stop();
+  });
+  // harness: render a fixed pose / a fixed fly-through time deterministically, then wait for the GPU
+  const still = (t) => { paused = true; F[TIME] = t; };
+  const settle = () => { F[FOGL] = fogLumAt(F[CX], F[CY], F[CZ]); F[EXPO] = expoAt(F[CX], F[CY], F[CZ]); };
+  window.__h = {
+    pose: async (i, t = 8) => { still(t); setPose(i); settle(); for (let k = 0; k < 3; k++) { render(); await Q.onSubmittedWorkDone(); } return [F[CX], F[CY], F[CZ]]; },
+    fly: async (t) => { still(t); flyAt(t); settle(); render(); await Q.onSubmittedWorkDone(); },
+    bench: () => new Promise((res) => { paused = false; window.__bench = null; start(2); const w = () => (window.__bench ? res(window.__bench) : setTimeout(w, 250)); w(); }),
+    gpu: () => F[GPU],
+    cam: async (x, y, z, tx, ty, tz, t = 8) => { still(t); aimAt(x, y, z, tx, ty, tz); settle(); for (let k = 0; k < 2; k++) { render(); await Q.onSubmittedWorkDone(); } },
+    info: () => ({ shrine: [SHRINE.x, gy(SHRINE.x, SHRINE.z), SHRINE.z], bridgeY: BRIDGE_Y, poses: POSES, carve: CARVE, slev0: SLEV[0], fly: Array.from(FLY) }),
+    counts: async (i) => { still(8); setPose(i); settle(); render(); const rb = device.createBuffer({ size: ARGS.byteLength, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const e = device.createCommandEncoder(); e.copyBufferToBuffer(bArgs, 0, rb, 0, ARGS.byteLength); Q.submit([e.finish()]); await rb.mapAsync(GPUMapMode.READ);
+      const a = new Uint32Array(rb.getMappedRange()).slice(); rb.unmap(); const o = []; let v = 0;
+      for (let k = 0; k < NKIND; k++) for (let l = 0; l < 2; l++) { const n = a[(k * 2 + l) * 5 + 1]; o.push(`k${k}l${l}:${n}x${a[(k * 2 + l) * 5]}`); v += n * a[(k * 2 + l) * 5]; }
+      return o.join(' ') + ` verts ${(v / 1e6).toFixed(1)}M`; },
+    free: () => { paused = false; tick = null; },
+    prof: async (i, mask, n = 300) => { still(8); if (i >= 100) flyAt(i - 100); else setPose(i); settle(); SKIP = mask; const g0 = GLN;
+      for (let k = 0; k < n; k++) { render(); if (k % 4 === 3) await Q.onSubmittedWorkDone(); }
+      await Q.onSubmittedWorkDone(); while (GLN < g0 + 200) await new Promise((r) => setTimeout(r, 50));
+      const v = []; for (let j = GLN - 120; j < GLN; j++) v.push(GLOG[j & (GLOGN - 1)]); v.sort((x, y) => x - y); SKIP = 0;
+      return +v[60].toFixed(2); },
+  };
+  if (QS.has('bench')) setTimeout(() => start(2), 3000);
+}
+// warm-up: draw every viewpoint and stretches of the path once so every pipeline variant is compiled before flight
+await say('Warming up…');
+for (let i = 0; i < POSES.length; i++) { setPose(i); render(); await Q.onSubmittedWorkDone(); }
+for (let t = 0; t <= FLYT; t += 3) { flyAt(t); render(); await Q.onSubmittedWorkDone(); }
+setPose(0);
+$('s').textContent = 'Click to enter';
+body.classList.add('ready');
+requestAnimationFrame(frame);
+
+})().catch(e=>{console.error(e);document.body.className='e';document.getElementById('s').textContent='Failed to start: '+e.message});
+</script>
+</body>
+</html>

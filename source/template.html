@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rừng — a Vietnamese rainforest</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #050806; overflow: hidden; font: 14px/1.5 system-ui, sans-serif; color: #dfe8d8; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #o { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: rgba(4,8,5,.55); transition: opacity .6s; cursor: pointer; text-align: center; }
+  #o h1 { margin: 0; font-weight: 300; letter-spacing: .35em; font-size: 34px; }
+  #s { opacity: .8; min-height: 1.5em; }
+  #k { opacity: .65; font-size: 13px; }
+  body.r #o { opacity: 0; pointer-events: none; }
+  body.e #o { cursor: default; }
+  #i { position: fixed; left: 10px; top: 8px; font: 12px/1.4 ui-monospace, monospace; white-space: pre; color: #cfe; text-shadow: 0 1px 2px #000; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="o"><h1>RỪNG</h1><div id="s">Loading…</div><div id="k">Click to enter · WASD move · mouse look · Q/E down/up · Shift fast · 1–6 viewpoints · F fly-through · B benchmark · H stats · Esc release</div></div>
+<div id="i"></div>
+<script>
+/*SCRIPT*/
+</script>
+</body>
+</html>
